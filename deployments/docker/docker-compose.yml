@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  waf:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile
+    ports:
+      - "8080:8080"
+      - "9090:9090"  # Metrics
+    volumes:
+      - ./configs:/root/configs
+      - waf-logs:/var/log/waf
+    environment:
+      - WAF_LOG_LEVEL=info
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    image: nginx:alpine
+    ports:
+      - "8000:80"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    restart: unless-stopped
+
+volumes:
+  waf-logs:
+  prometheus-data:
+  grafana-data:

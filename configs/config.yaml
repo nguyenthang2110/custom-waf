@@ -1,0 +1,26 @@
+server:
+  listen: "0.0.0.0:8080"
+  read_timeout: 30
+  write_timeout: 30
+  idle_timeout: 120
+
+upstream:
+  url: "http://127.0.0.1:8000" # Your backend service
+
+parser:
+  max_body_size: 10485760 # 10MB
+
+rate_limit:
+  requests_per_min: 100
+  burst_size: 20
+
+behavior:
+  bruteforce_threshold: 5
+  bruteforce_window: 300s
+
+decision:
+  block_threshold: 5.0 # Block if score >= 5
+  challenge_threshold: 4.0 # Challenge if score >= 4
+
+audit:
+  log_path: "/var/log/waf/audit.log"

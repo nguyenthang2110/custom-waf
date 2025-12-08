@@ -1,0 +1,1224 @@
+[
+  {
+    "id": "WAF-001-SQLI-UNION",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "SQL Injection",
+      "severity": "CRITICAL",
+      "tags": ["sqli", "union-based", "owasp-a03"],
+      "description": "Detects UNION-based SQL injection attempts",
+      "author": "WAF Security Team",
+      "created": "2025-01-01"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["PATH", "QUERY", "BODY"],
+      "methods": ["GET", "POST", "PUT"],
+      "path_patterns": []
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE",
+      "COMPRESS_WHITESPACE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "union.*select|select.*union",
+        "flags": "i"
+      },
+      {
+        "type": "TOKEN",
+        "tokens": ["union", "select"],
+        "proximity": 20,
+        "order": "sequential"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "WARNING"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": ["/health", "/metrics"]
+    }
+  },
+  {
+    "id": "WAF-002-SQLI-BOOLEAN",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "SQL Injection",
+      "severity": "HIGH",
+      "tags": ["sqli", "boolean-based", "owasp-a03"],
+      "description": "Detects boolean-based SQL injection (1=1, true/false)",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["QUERY", "BODY"],
+      "methods": ["GET", "POST"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE",
+      "REMOVE_WHITESPACE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "(and|or)\\d*=\\d*|(and|or)(true|false)",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 4,
+      "severity_multiplier": 1.2
+    },
+    "actions": [
+      {
+        "type": "LOG"
+      },
+      {
+        "type": "SCORE",
+        "increment": 4
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-003-SQLI-TIMEBASED",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "SQL Injection",
+      "severity": "CRITICAL",
+      "tags": ["sqli", "time-based", "blind-sqli"],
+      "description": "Detects time-based blind SQL injection (sleep, benchmark, waitfor)",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["PATH", "QUERY", "BODY"],
+      "methods": ["GET", "POST", "PUT"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "sleep\\s*\\(|benchmark\\s*\\(|waitfor\\s+delay|pg_sleep",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "CRITICAL"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-004-SQLI-ERRORBASED",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "SQL Injection",
+      "severity": "HIGH",
+      "tags": ["sqli", "error-based", "owasp-a03"],
+      "description": "Detects typical error-based SQLi payload functions (extractvalue, updatexml, version(), database())",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["PATH", "QUERY", "BODY"],
+      "methods": ["GET", "POST", "PUT"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE",
+      "COMPRESS_WHITESPACE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "(extractvalue|updatexml)\\s*\\(|@@version|database\\s*\\(|schema_name\\s*\\(",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 4,
+      "severity_multiplier": 1.3
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "WARNING"
+      },
+      {
+        "type": "SCORE",
+        "increment": 4
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-005-SQLI-STACKED",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "SQL Injection",
+      "severity": "CRITICAL",
+      "tags": ["sqli", "stacked-queries", "owasp-a03"],
+      "description": "Detects stacked SQL queries using semicolon and SQL keywords",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["QUERY", "BODY"],
+      "methods": ["GET", "POST", "PUT"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE",
+      "COMPRESS_WHITESPACE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": ";\\s*(select|insert|update|delete|drop|alter|create)\\b",
+        "flags": "i"
+      },
+      {
+        "type": "REGEX",
+        "pattern": "--\\s*[\\w\\s]*;",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "CRITICAL"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-010-XSS-SCRIPT",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Cross-Site Scripting",
+      "severity": "CRITICAL",
+      "tags": ["xss", "script-injection", "owasp-a03"],
+      "description": "Detects <script> tag injection attempts",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["PATH", "QUERY", "BODY"],
+      "methods": ["GET", "POST", "PUT"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "HTML_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "<script|</script|javascript:|<img.*onerror|<svg.*onload",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "WARNING"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-011-XSS-EVENTHANDLER",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Cross-Site Scripting",
+      "severity": "HIGH",
+      "tags": ["xss", "event-handler", "owasp-a03"],
+      "description": "Detects JavaScript event handler injection",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["QUERY", "BODY"],
+      "methods": ["GET", "POST"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE",
+      "REMOVE_WHITESPACE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "on(click|load|error|mouse|focus|blur)\\s*=",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 4,
+      "severity_multiplier": 1.2
+    },
+    "actions": [
+      {
+        "type": "LOG"
+      },
+      {
+        "type": "SCORE",
+        "increment": 4
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-012-XSS-ENCODED",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Cross-Site Scripting",
+      "severity": "CRITICAL",
+      "tags": ["xss", "encoded-xss", "script-injection"],
+      "description": "Detects URL/HTML-encoded XSS payloads such as %3cscript, alert%28, javascript%3a",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["PATH", "QUERY", "BODY"],
+      "methods": ["GET", "POST", "PUT"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "HTML_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "(%3c|<)script|(%3c|<)img.*onerror|alert%28|onerror%3d|javascript%3a",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "WARNING"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-013-XSS-DOM-API",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Cross-Site Scripting",
+      "severity": "HIGH",
+      "tags": ["xss", "dom-xss", "javascript-api"],
+      "description": "Detects dangerous DOM XSS sinks like document.cookie, location.href, eval() in parameters",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["QUERY", "BODY"],
+      "methods": ["GET", "POST"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE",
+      "REMOVE_WHITESPACE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "document\\.cookie|document\\.location|location\\.href|localstorage\\.|sessionstorage\\.|eval\\s*\\(",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 4,
+      "severity_multiplier": 1.2
+    },
+    "actions": [
+      {
+        "type": "LOG"
+      },
+      {
+        "type": "SCORE",
+        "increment": 4
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-020-LFI-TRAVERSAL",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Path Traversal",
+      "severity": "CRITICAL",
+      "tags": ["lfi", "path-traversal", "directory-traversal"],
+      "description": "Detects path traversal attempts (../)",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["PATH", "QUERY"],
+      "methods": ["GET", "POST"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "\\.\\./|\\.\\.\\\\/|\\.\\.%2f|%2e%2e",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "CRITICAL"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-021-LFI-SENSITIVE",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Local File Inclusion",
+      "severity": "CRITICAL",
+      "tags": ["lfi", "sensitive-files"],
+      "description": "Detects attempts to access sensitive system files",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["PATH", "QUERY", "BODY"],
+      "methods": ["GET", "POST"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "/etc/passwd|/etc/shadow|c:\\\\windows|/proc/self|win\\.ini",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "CRITICAL"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-022-LFI-LOG-POISONING",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Path Traversal",
+      "severity": "HIGH",
+      "tags": ["lfi", "log-poisoning", "file-inclusion"],
+      "description": "Detects attempts to include log files via LFI (access.log, error.log, /var/log)",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["PATH", "QUERY"],
+      "methods": ["GET", "POST"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "/var/log|access\\.log|error\\.log|\\.log%00",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 4,
+      "severity_multiplier": 1.3
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "CRITICAL"
+      },
+      {
+        "type": "SCORE",
+        "increment": 4
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-030-RCE-COMMAND",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Remote Code Execution",
+      "severity": "CRITICAL",
+      "tags": ["rce", "command-injection", "shell"],
+      "description": "Detects command injection attempts",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["QUERY", "BODY"],
+      "methods": ["GET", "POST", "PUT"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "[|&;]\\s*(cat|ls|wget|curl|nc|bash|sh|cmd|powershell)",
+        "flags": "i"
+      },
+      {
+        "type": "REGEX",
+        "pattern": "\\$\\(.*\\)|`.*`",
+        "flags": ""
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "CRITICAL"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-031-RCE-PHP",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Remote Code Execution",
+      "severity": "CRITICAL",
+      "tags": ["rce", "php", "code-execution"],
+      "description": "Detects PHP code execution attempts",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["QUERY", "BODY"],
+      "methods": ["POST", "PUT"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "(eval|exec|system|passthru|shell_exec|assert)\\s*\\(",
+        "flags": "i"
+      },
+      {
+        "type": "WORDLIST",
+        "tokens": ["php://input", "php://filter", "data://"]
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "CRITICAL"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-032-RCE-WINDOWS-COMMANDS",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Remote Code Execution",
+      "severity": "CRITICAL",
+      "tags": ["rce", "windows", "command-injection"],
+      "description": "Detects Windows command execution payloads (cmd.exe, powershell, certutil, whoami)",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["QUERY", "BODY"],
+      "methods": ["GET", "POST", "PUT"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "cmd\\.exe|powershell(\\.exe)?|certutil(\\.exe)?|whoami\\b|net\\s+user|net\\s+localgroup",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "CRITICAL"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-040-SSRF-INTERNAL",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Server-Side Request Forgery",
+      "severity": "HIGH",
+      "tags": ["ssrf", "internal-ip"],
+      "description": "Detects SSRF attempts to internal/localhost IPs",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["QUERY", "BODY"],
+      "methods": ["GET", "POST"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::\\]|0x7f",
+        "flags": "i"
+      },
+      {
+        "type": "REGEX",
+        "pattern": "10\\.\\d+\\.\\d+\\.\\d+|172\\.16\\.|192\\.168\\.",
+        "flags": ""
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 4,
+      "severity_multiplier": 1.2
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "WARNING"
+      },
+      {
+        "type": "SCORE",
+        "increment": 4
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-041-SSRF-CLOUD-METADATA",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Server-Side Request Forgery",
+      "severity": "CRITICAL",
+      "tags": ["ssrf", "cloud-metadata", "aws", "gcp"],
+      "description": "Detects attempts to access cloud metadata services",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["QUERY", "BODY"],
+      "methods": ["GET", "POST"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "169\\.254\\.169\\.254|metadata\\.google|instance-data",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "CRITICAL"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-042-SSRF-DANGEROUS-SCHEMES",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Server-Side Request Forgery",
+      "severity": "HIGH",
+      "tags": ["ssrf", "url-scheme"],
+      "description": "Detects SSRF payloads using dangerous URL schemes (file://, gopher://, dict://, smb://, ftp://)",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["QUERY", "BODY"],
+      "methods": ["GET", "POST"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "(file|gopher|dict|smb|ftp)://",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 4,
+      "severity_multiplier": 1.2
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "WARNING"
+      },
+      {
+        "type": "SCORE",
+        "increment": 4
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-050-XXE-ENTITY",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "XML External Entity",
+      "severity": "CRITICAL",
+      "tags": ["xxe", "xml-injection"],
+      "description": "Detects XXE injection attempts",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["BODY"],
+      "methods": ["POST", "PUT"]
+    },
+    "transforms": [
+      "LOWERCASE",
+      "REMOVE_WHITESPACE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "<!entity|<!doctype.*system|<!doctype.*public",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "CRITICAL"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-051-XXE-OUTBOUND-SYSTEM",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "XML External Entity",
+      "severity": "CRITICAL",
+      "tags": ["xxe", "xml-injection", "oob-xxe"],
+      "description": "Detects XXE with external SYSTEM identifiers over HTTP/FILE/FTP",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["BODY"],
+      "methods": ["POST", "PUT"]
+    },
+    "transforms": [
+      "LOWERCASE",
+      "REMOVE_WHITESPACE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "<!doctype.*<!entity.*system\"?(http|file|ftp)://",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "CRITICAL"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-060-NOSQLI-OPERATORS",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "NoSQL Injection",
+      "severity": "HIGH",
+      "tags": ["nosqli", "mongodb", "injection"],
+      "description": "Detects NoSQL injection using MongoDB operators",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["QUERY", "BODY"],
+      "methods": ["GET", "POST"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "\\$ne|\\$gt|\\$lt|\\$where|\\$regex|\\$or",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 4,
+      "severity_multiplier": 1.2
+    },
+    "actions": [
+      {
+        "type": "LOG"
+      },
+      {
+        "type": "SCORE",
+        "increment": 4
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-061-NOSQLI-JSON-OPERATORS",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "NoSQL Injection",
+      "severity": "HIGH",
+      "tags": ["nosqli", "mongodb", "json"],
+      "description": "Detects NoSQL injection when MongoDB operators appear as JSON keys",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["QUERY", "BODY"],
+      "methods": ["GET", "POST"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "\"\\$ne\"\\s*:|\"\\$gt\"\\s*:|\"\\$lt\"\\s*:|\"\\$regex\"\\s*:|\"\\$or\"\\s*:",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 4,
+      "severity_multiplier": 1.2
+    },
+    "actions": [
+      {
+        "type": "LOG"
+      },
+      {
+        "type": "SCORE",
+        "increment": 4
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-070-LOG4J-RCE",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Remote Code Execution",
+      "severity": "CRITICAL",
+      "cve": ["CVE-2021-44228"],
+      "tags": ["rce", "log4j", "log4shell"],
+      "description": "Detects Log4Shell (CVE-2021-44228) exploitation attempts",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["PATH", "QUERY", "BODY", "HEADERS"],
+      "methods": ["GET", "POST", "PUT", "DELETE"]
+    },
+    "transforms": [
+      "URL_DECODE",
+      "LOWERCASE",
+      "REMOVE_WHITESPACE"
+    ],
+    "patterns": [
+      {
+        "type": "REGEX",
+        "pattern": "\\$\\{jndi:(ldap|rmi|dns)://",
+        "flags": "i"
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "CRITICAL"
+      },
+      {
+        "type": "SCORE",
+        "increment": 5
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": [],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-080-SCANNER-DETECTION",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Malicious Bot",
+      "severity": "MEDIUM",
+      "tags": ["scanner", "bot", "recon"],
+      "description": "Detects security scanners and automated tools",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["HEADERS"],
+      "methods": ["GET", "POST", "HEAD"]
+    },
+    "transforms": [
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "WORDLIST",
+        "tokens": [
+          "nmap",
+          "nikto",
+          "sqlmap",
+          "masscan",
+          "nessus",
+          "acunetix",
+          "burpsuite",
+          "zgrab"
+        ]
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 3,
+      "severity_multiplier": 1.0
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "INFO"
+      },
+      {
+        "type": "SCORE",
+        "increment": 3
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": ["Internal-Scanner/1.0"],
+      "paths": []
+    }
+  },
+  {
+    "id": "WAF-081-SCANNER-PATH-PROBES",
+    "version": "1.0",
+    "enabled": true,
+    "metadata": {
+      "category": "Malicious Bot",
+      "severity": "MEDIUM",
+      "tags": ["scanner", "bot", "recon", "common-paths"],
+      "description": "Detects typical scanner path probes (.git, wp-admin, phpmyadmin, server-status, HNAP1)",
+      "author": "WAF Security Team"
+    },
+    "conditions": {
+      "phase": "REQUEST",
+      "targets": ["PATH"],
+      "methods": ["GET", "HEAD"]
+    },
+    "transforms": [
+      "LOWERCASE"
+    ],
+    "patterns": [
+      {
+        "type": "WORDLIST",
+        "tokens": [
+          "/.git/",
+          "/.env",
+          "/phpmyadmin",
+          "/wp-admin",
+          "/wp-login.php",
+          "/server-status",
+          "/HNAP1",
+          "/config.php",
+          "/test.php"
+        ]
+      }
+    ],
+    "scoring": {
+      "anomaly_score": 3,
+      "severity_multiplier": 1.0
+    },
+    "actions": [
+      {
+        "type": "LOG",
+        "level": "INFO"
+      },
+      {
+        "type": "SCORE",
+        "increment": 3
+      }
+    ],
+    "exceptions": {
+      "ips": [],
+      "user_agents": ["Internal-Scanner/1.0"],
+      "paths": []
+    }
+  }
+]
