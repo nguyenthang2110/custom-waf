@@ -2,6 +2,7 @@
 package decision
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -137,19 +138,23 @@ func (de *DecisionEngine) DecideWithDetails(
 	})
 
 	// Step 1: Check blacklist (highest priority)
-	if de.config.EnableBlacklist && de.isBlacklisted(req.ClientIP) {
-		result.Decision = "BLOCK"
-		result.Reason = "IP is blacklisted"
-		result.IsBlacklisted = true
-		result.ResponseCode = 403
-		result.ResponseMessage = "Access Denied"
-		result.BlockDuration = 24 * time.Hour
+	if de.config.EnableBlacklist {
+		isBlocked := de.isBlacklisted(req.ClientIP)
 
-		de.updateStats(func() {
-			de.stats.BlacklistHits++
-			de.stats.BlockCount++
-		})
-		return result
+		if isBlocked {
+			result.Decision = "BLOCK"
+			result.Reason = "IP is blacklisted"
+			result.IsBlacklisted = true
+			result.ResponseCode = 403
+			result.ResponseMessage = "Access Denied"
+			// result.BlockDuration = 24 * time.Hour
+
+			de.updateStats(func() {
+				de.stats.BlacklistHits++
+				de.stats.BlockCount++
+			})
+			return result
+		}
 	}
 
 	// Step 2: Check whitelist (second highest priority)
@@ -511,10 +516,12 @@ func (de *DecisionEngine) IsHealthCheckPath(path string) bool {
 		"/ping",
 		"/status",
 		"/metrics",
+		"/api/",      // API endpoints
+		"/dashboard", // Dashboard
 	}
 
 	for _, hcp := range healthCheckPaths {
-		if path == hcp {
+		if path == hcp || strings.HasPrefix(path, hcp) {
 			return true
 		}
 	}

@@ -8,21 +8,29 @@ import (
 
 // RateLimiter implements token bucket algorithm for rate limiting
 type RateLimiter struct {
-	clients       map[string]*clientBucket
-	routes        map[string]*routeBucket
-	mu            sync.RWMutex
-	config        RateLimitConfig
-	cleanupTicker *time.Ticker
-	stopCleanup   chan bool
+	clients         map[string]*clientBucket
+	endpointBuckets map[string]map[string]*clientBucket // endpoint -> clientIP -> bucket
+	routes          map[string]*routeBucket
+	mu              sync.RWMutex
+	config          RateLimitConfig
+	cleanupTicker   *time.Ticker
+	stopCleanup     chan bool
 }
 
 // RateLimitConfig defines rate limiting configuration
 type RateLimitConfig struct {
-	RequestsPerMin  int           // Max requests per minute per client
-	BurstSize       int           // Maximum burst size (token bucket capacity)
-	CleanupInterval time.Duration // How often to cleanup old entries
-	RouteEnabled    bool          // Enable per-route rate limiting
-	RouteLimit      int           // Requests per minute per route
+	RequestsPerMin  int                    // Max requests per minute per client (Global)
+	BurstSize       int                    // Maximum burst size (token bucket capacity)
+	CleanupInterval time.Duration          // How often to cleanup old entries
+	RouteEnabled    bool                   // Enable per-route rate limiting (Legacy/Additional)
+	RouteLimit      int                    // Requests per minute per route
+	EndpointLimits  map[string]LimitConfig // Specific limits per endpoint
+}
+
+// LimitConfig defines rate limit for a specific context
+type LimitConfig struct {
+	RequestsPerMin int
+	BurstSize      int
 }
 
 // clientBucket tracks rate limit state for a single client IP
@@ -56,10 +64,11 @@ func NewRateLimiter(config RateLimitConfig) *RateLimiter {
 	}
 
 	rl := &RateLimiter{
-		clients:     make(map[string]*clientBucket),
-		routes:      make(map[string]*routeBucket),
-		config:      config,
-		stopCleanup: make(chan bool),
+		clients:         make(map[string]*clientBucket),
+		endpointBuckets: make(map[string]map[string]*clientBucket),
+		routes:          make(map[string]*routeBucket),
+		config:          config,
+		stopCleanup:     make(chan bool),
 	}
 
 	// Start cleanup goroutine
@@ -80,44 +89,92 @@ func (rl *RateLimiter) IsRateLimitedWithRoute(clientIP, route string) bool {
 
 	now := time.Now()
 
-	// Check client-level rate limit
-	bucket, exists := rl.clients[clientIP]
-	if !exists {
-		// First request from this client
-		bucket = &clientBucket{
-			tokens:       rl.config.BurstSize,
-			lastRefill:   now,
-			firstRequest: now,
-			lastRequest:  now,
+	// 1. Check Endpoint-Specific Limits
+	// If the route matches a specific endpoint config, we use that bucket INSTEAD of global
+	// This allows setting higher or lower limits for specific paths
+	var usedBucket *clientBucket
+	var rpm int
+	var burst int
+
+	// Simple exact match for now (can be enhanced to prefix match later if needed)
+	if limitConfig, ok := rl.config.EndpointLimits[route]; ok {
+		// Ensure map exists for this endpoint
+		if rl.endpointBuckets == nil {
+			rl.endpointBuckets = make(map[string]map[string]*clientBucket)
 		}
-		rl.clients[clientIP] = bucket
+		if rl.endpointBuckets[route] == nil {
+			rl.endpointBuckets[route] = make(map[string]*clientBucket)
+		}
+
+		bucket, exists := rl.endpointBuckets[route][clientIP]
+		if !exists {
+			bucket = &clientBucket{
+				tokens:       limitConfig.BurstSize,
+				lastRefill:   now,
+				firstRequest: now,
+				lastRequest:  now,
+			}
+			rl.endpointBuckets[route][clientIP] = bucket
+		}
+		usedBucket = bucket
+		rpm = limitConfig.RequestsPerMin
+		burst = limitConfig.BurstSize
+	} else {
+		// 2. Global Limit (Fallback)
+		bucket, exists := rl.clients[clientIP]
+		if !exists {
+			bucket = &clientBucket{
+				tokens:       rl.config.BurstSize,
+				lastRefill:   now,
+				firstRequest: now,
+				lastRequest:  now,
+			}
+			rl.clients[clientIP] = bucket
+		}
+		usedBucket = bucket
+		rpm = rl.config.RequestsPerMin
+		burst = rl.config.BurstSize
 	}
 
-	// Refill tokens based on time elapsed
-	rl.refillTokens(bucket, now)
+	// Refill tokens
+	rl.refillTokensWithConfig(usedBucket, now, rpm, burst)
 
-	// Update request tracking
-	bucket.requestCount++
-	bucket.lastRequest = now
+	// Update tracking
+	usedBucket.requestCount++
+	usedBucket.lastRequest = now
 
-	// Check if rate limited
-	if bucket.tokens <= 0 {
-		bucket.blockedCount++
+	// Check limit
+	if usedBucket.tokens <= 0 {
+		usedBucket.blockedCount++
 		return true
 	}
 
-	// Consume a token
-	bucket.tokens--
+	usedBucket.tokens--
 
-	// Check route-level rate limit if enabled
+	// 3. Legacy/Secondary Route Rate Limit (Shared across all IPs)
+	// This protects the route itself from total traffic overload, regardless of IP
 	if rl.config.RouteEnabled && route != "" {
 		if rl.isRouteLimited(route, now) {
-			bucket.blockedCount++
+			usedBucket.blockedCount++ // Credit the block to the user too
 			return true
 		}
 	}
 
 	return false
+}
+
+// refillTokensWithConfig adds tokens based on dynamic config
+func (rl *RateLimiter) refillTokensWithConfig(bucket *clientBucket, now time.Time, rpm, burst int) {
+	elapsed := now.Sub(bucket.lastRefill)
+	tokensToAdd := int(elapsed.Seconds()) * (rpm / 60)
+
+	if tokensToAdd > 0 {
+		bucket.tokens += tokensToAdd
+		if bucket.tokens > burst {
+			bucket.tokens = burst
+		}
+		bucket.lastRefill = now
+	}
 }
 
 // refillTokens adds tokens to bucket based on elapsed time
@@ -271,6 +328,7 @@ func (rl *RateLimiter) ResetAllClients() {
 	defer rl.mu.Unlock()
 
 	rl.clients = make(map[string]*clientBucket)
+	rl.endpointBuckets = make(map[string]map[string]*clientBucket)
 	rl.routes = make(map[string]*routeBucket)
 }
 
@@ -303,6 +361,15 @@ func (rl *RateLimiter) cleanup() {
 	for ip, bucket := range rl.clients {
 		if now.Sub(bucket.lastRequest) > cleanupThreshold {
 			delete(rl.clients, ip)
+		}
+	}
+
+	// Cleanup endpoint buckets
+	for _, ipMap := range rl.endpointBuckets {
+		for ip, bucket := range ipMap {
+			if now.Sub(bucket.lastRequest) > cleanupThreshold {
+				delete(ipMap, ip)
+			}
 		}
 	}
 

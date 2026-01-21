@@ -1,0 +1,41 @@
+Báo cáo WAF
+
+1) Giải thích trực tiếp trên một rule mẫu (từ configs/rules/all_rules.json)
+{
+  "id": "WAF-001-SQLI-UNION",          // Mã rule duy nhất
+  "version": "1.0",                    // Phiên bản rule
+  "enabled": true,                     // Bật/tắt rule
+  "metadata": {                        // Thông tin mô tả
+    "category": "SQL Injection",       // Nhóm tấn công
+    "severity": "CRITICAL",            // Mức độ nghiêm trọng
+    "tags": ["sqli","union-based"],    // Tag phân loại
+    "description": "Detects UNION-based SQL injection attempts",
+    "author": "NHT",
+    "created": "2025-01-01"
+  },
+  "conditions": {                      // Điều kiện áp dụng
+    "phase": "REQUEST",
+    "targets": ["PATH","QUERY","BODY"],// Trường sẽ kiểm tra
+    "methods": ["GET","POST","PUT"],   // Giới hạn HTTP method
+    "path_patterns": []                // Regex đường dẫn nếu cần
+  },
+  "transforms": [                      // Biến đổi trước khi match
+    "URL_DECODE","LOWERCASE","COMPRESS_WHITESPACE"
+  ],
+  "patterns": [                        // Mẫu để bắt
+    { "type": "REGEX", "pattern": "union.*select|select.*union", "flags": "i" },
+    { "type": "TOKEN", "tokens": ["union","select"], "proximity": 20, "order": "sequential" }
+  ],
+  "scoring": {                         // Cách tính điểm
+    "anomaly_score": 5,                // Điểm gốc
+    "severity_multiplier": 1.5         // Nhân theo severity
+  },
+  "actions": [                         // Hành động bổ sung (ghi log/tăng điểm)
+    { "type": "LOG", "level": "WARNING" },
+    { "type": "SCORE", "increment": 5 }
+  ],
+  "exceptions": {                      // Trường hợp bỏ qua
+    "ips": [], "user_agents": [], "paths": ["/health","/metrics"]
+  }
+}
+

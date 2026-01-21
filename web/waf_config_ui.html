@@ -1,0 +1,194 @@
+// Add this to the renderConfiguration() method after the Backend Configuration section
+
+<!-- WAF Configuration Settings -->
+<div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+    <div class="mb-6">
+        <h3 class="text-2xl font-bold mb-2">WAF Settings</h3>
+        <p class="text-sm text-gray-400">Configure WAF thresholds and rate limits</p>
+    </div>
+
+    <!-- Current Settings Display -->
+    <div class="grid md:grid-cols-2 gap-4 mb-6">
+        <div class="bg-gray-700 rounded-lg p-4">
+            <div class="text-sm text-gray-400 mb-1">Block Threshold</div>
+            <div class="text-2xl font-bold text-red-400">${this.wafConfig ?
+                this.wafConfig.decision.block_threshold.toFixed(1) : '5.0'}</div>
+        </div>
+        <div class="bg-gray-700 rounded-lg p-4">
+            <div class="text-sm text-gray-400 mb-1">Challenge Threshold</div>
+            <div class="text-2xl font-bold text-yellow-400">${this.wafConfig ?
+                this.wafConfig.decision.challenge_threshold.toFixed(1) : '4.0'}</div>
+        </div>
+        <div class="bg-gray-700 rounded-lg p-4">
+            <div class="text-sm text-gray-400 mb-1">Requests Per Minute</div>
+            <div class="text-2xl font-bold text-cyan-400">${this.wafConfig ? this.wafConfig.rate_limit.requests_per_min
+                : '100'}</div>
+        </div>
+        <div class="bg-gray-700 rounded-lg p-4">
+            <div class="text-sm text-gray-400 mb-1">Burst Size</div>
+            <div class="text-2xl font-bold text-green-400">${this.wafConfig ? this.wafConfig.rate_limit.burst_size :
+                '20'}</div>
+        </div>
+    </div>
+
+    <!-- Configuration Form -->
+    <form onsubmit="dashboard.updateWAFConfig(event)" class="space-y-6">
+        <!-- Decision Thresholds -->
+        <div class="border border-gray-600 rounded-lg p-4">
+            <h4 class="font-bold mb-4 text-lg">Decision Thresholds</h4>
+            <div class="grid md:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium mb-2">
+                        Block Threshold
+                        <span class="text-gray-400 text-xs ml-1">(Score >= this → BLOCK)</span>
+                    </label>
+                    <input type="number" step="0.1" min="0" max="100" name="block_threshold"
+                        value="${this.wafConfig ? this.wafConfig.decision.block_threshold : '5.0'}" required
+                        class="w-full px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:outline-none focus:border-red-400">
+                    <p class="text-xs text-gray-400 mt-1">Range: 0.0 - 100.0</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-2">
+                        Challenge Threshold
+                        <span class="text-gray-400 text-xs ml-1">(Score >= this → CHALLENGE)</span>
+                    </label>
+                    <input type="number" step="0.1" min="0" max="100" name="challenge_threshold"
+                        value="${this.wafConfig ? this.wafConfig.decision.challenge_threshold : '4.0'}" required
+                        class="w-full px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:outline-none focus:border-yellow-400">
+                    <p class="text-xs text-gray-400 mt-1">Must be less than Block Threshold</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Rate Limiting -->
+        <div class="border border-gray-600 rounded-lg p-4">
+            <h4 class="font-bold mb-4 text-lg">Rate Limiting</h4>
+            <div class="grid md:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium mb-2">
+                        Requests Per Minute
+                        <span class="text-gray-400 text-xs ml-1">(Per IP)</span>
+                    </label>
+                    <input type="number" min="1" max="10000" name="requests_per_min"
+                        value="${this.wafConfig ? this.wafConfig.rate_limit.requests_per_min : '100'}" required
+                        class="w-full px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:outline-none focus:border-cyan-400">
+                    <p class="text-xs text-gray-400 mt-1">Range: 1 - 10000</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-2">
+                        Burst Size
+                        <span class="text-gray-400 text-xs ml-1">(Burst allowance)</span>
+                    </label>
+                    <input type="number" min="1" max="1000" name="burst_size"
+                        value="${this.wafConfig ? this.wafConfig.rate_limit.burst_size : '20'}" required
+                        class="w-full px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:outline-none focus:border-green-400">
+                    <p class="text-xs text-gray-400 mt-1">Range: 1 - 1000</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Submit Button -->
+        <button type="submit"
+            class="w-full px-6 py-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 rounded-lg font-semibold transition flex items-center justify-center gap-2">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+            </svg>
+            Apply Changes
+        </button>
+    </form>
+
+    <!-- Info Box -->
+    <div class="mt-6 p-4 bg-yellow-900/30 border border-yellow-700 rounded-lg">
+        <div class="flex items-start gap-3">
+            <svg class="w-5 h-5 text-yellow-400 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <div class="text-sm">
+                <p class="font-semibold text-yellow-400 mb-1">Immediate Effect</p>
+                <p class="text-gray-300">Changes take effect immediately without restart. Lower thresholds = stricter
+                    protection.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+// Add these JavaScript methods to the dashboard class:
+
+async loadWAFConfig() {
+try {
+const response = await fetch(`${API_BASE}/config`);
+const data = await response.json();
+this.wafConfig = data;
+} catch (error) {
+console.error('Failed to load WAF config:', error);
+this.wafConfig = null;
+}
+}
+
+async updateWAFConfig(event) {
+event.preventDefault();
+const formData = new FormData(event.target);
+
+const config = {
+decision: {
+block_threshold: parseFloat(formData.get('block_threshold')),
+challenge_threshold: parseFloat(formData.get('challenge_threshold'))
+},
+rate_limit: {
+requests_per_min: parseInt(formData.get('requests_per_min')),
+burst_size: parseInt(formData.get('burst_size'))
+}
+};
+
+// Validate
+if (config.decision.challenge_threshold >= config.decision.block_threshold) {
+this.showPopupNotification(
+'error',
+'Invalid Configuration',
+'Challenge threshold must be less than block threshold',
+null
+);
+return;
+}
+
+try {
+const response = await fetch(`${API_BASE}/config`, {
+method: 'POST',
+headers: { 'Content-Type': 'application/json' },
+body: JSON.stringify(config)
+});
+
+const result = await response.json();
+
+if (result.success) {
+this.wafConfig = result.config;
+this.showPopupNotification(
+'success',
+'Configuration Updated!',
+`Block: ${config.decision.block_threshold}, Challenge: ${config.decision.challenge_threshold}, RPM:
+${config.rate_limit.requests_per_min}`,
+null
+);
+this.render();
+} else {
+this.showPopupNotification(
+'error',
+'Update Failed',
+result.message || 'Failed to update configuration',
+null
+);
+}
+} catch (error) {
+this.showPopupNotification(
+'error',
+'Error',
+`Failed to update configuration: ${error.message}`,
+null
+);
+}
+}
+
+// Add to init() method:
+await this.loadWAFConfig();

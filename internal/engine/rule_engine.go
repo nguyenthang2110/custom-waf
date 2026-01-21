@@ -78,6 +78,82 @@ func (re *RuleEngine) LoadRulesFromJSON(data []byte) error {
 	return nil
 }
 
+// ValidateRulesJSON validates rules JSON without loading them
+// Returns the count of valid rules and any errors
+func (re *RuleEngine) ValidateRulesJSON(data []byte) (int, error) {
+	var rules []Rule
+	if err := json.Unmarshal(data, &rules); err != nil {
+		return 0, fmt.Errorf("invalid JSON format: %w", err)
+	}
+
+	if len(rules) == 0 {
+		return 0, fmt.Errorf("no rules found in file")
+	}
+
+	// Validate each rule
+	validCount := 0
+	var validationErrors []string
+
+	for i := range rules {
+		if err := re.validateRule(&rules[i]); err != nil {
+			validationErrors = append(validationErrors,
+				fmt.Sprintf("rule %s: %v", rules[i].ID, err))
+		} else {
+			validCount++
+		}
+	}
+
+	if len(validationErrors) > 0 {
+		return validCount, fmt.Errorf("validation errors: %s",
+			strings.Join(validationErrors, "; "))
+	}
+
+	return validCount, nil
+}
+
+// ReloadRules atomically replaces all current rules with new ones
+// This allows hot-reload without restarting the WAF
+func (re *RuleEngine) ReloadRules(data []byte) error {
+	// First validate the new rules
+	_, err := re.ValidateRulesJSON(data)
+	if err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	// Parse rules again (already validated)
+	var newRules []Rule
+	if err := json.Unmarshal(data, &newRules); err != nil {
+		return fmt.Errorf("failed to parse rules: %w", err)
+	}
+
+	// Prepare new rules (compile patterns)
+	preparedRules := make([]*Rule, 0, len(newRules))
+	for i := range newRules {
+		newRules[i].compilePatterns()
+		preparedRules = append(preparedRules, &newRules[i])
+	}
+
+	// Create new cache
+	newCache := make(map[string]*Rule)
+	for _, rule := range preparedRules {
+		newCache[rule.ID] = rule
+	}
+
+	// Atomically replace rules (lock for write)
+	re.mu.Lock()
+	re.rules = preparedRules
+	re.ruleCache = newCache
+	re.mu.Unlock()
+
+	// Reset metrics for rule hit counts (keep total stats)
+	re.metrics.mu.Lock()
+	re.metrics.RuleHitCount = make(map[string]int64)
+	re.metrics.CategoryStats = make(map[string]int64)
+	re.metrics.mu.Unlock()
+
+	return nil
+}
+
 // addRule adds a single rule to the engine
 func (re *RuleEngine) addRule(rule *Rule) error {
 	// Validate rule

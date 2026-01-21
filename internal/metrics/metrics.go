@@ -66,6 +66,13 @@ type Collector struct {
 	mu    sync.RWMutex
 }
 
+// ClientStat tracks statistics for a single client IP
+type ClientStat struct {
+	TotalRequests int64
+	TotalBlocked  int64
+	LastSeen      time.Time
+}
+
 // MetricsStats holds internal statistics
 type MetricsStats struct {
 	StartTime       time.Time
@@ -77,6 +84,7 @@ type MetricsStats struct {
 	UniqueClients   int
 	TopRules        map[string]int64
 	TopCategories   map[string]int64
+	Clients         map[string]*ClientStat
 }
 
 // NewCollector creates a new metrics collector
@@ -86,6 +94,7 @@ func NewCollector() *Collector {
 			StartTime:     time.Now(),
 			TopRules:      make(map[string]int64),
 			TopCategories: make(map[string]int64),
+			Clients:       make(map[string]*ClientStat),
 		},
 	}
 
@@ -381,11 +390,27 @@ func (c *Collector) RecordRequest(decision string, score float64) {
 
 // RecordRequestWithDetails records detailed request metrics
 func (c *Collector) RecordRequestWithDetails(
-	method, path, decision string,
+	clientIP, method, path, decision string,
 	score float64,
 	duration time.Duration,
 	requestSize, responseSize int,
 ) {
+	c.mu.Lock()
+	// Update client stats
+	client, exists := c.stats.Clients[clientIP]
+	if !exists {
+		client = &ClientStat{}
+		c.stats.Clients[clientIP] = client
+		c.stats.UniqueClients++
+		c.uniqueClientsGauge.Set(float64(c.stats.UniqueClients))
+	}
+	client.TotalRequests++
+	client.LastSeen = time.Now()
+	if decision == "BLOCK" {
+		client.TotalBlocked++
+	}
+	c.mu.Unlock()
+
 	c.RecordRequest(decision, score)
 
 	c.requestsTotal.WithLabelValues(method, path, decision).Inc()
@@ -508,6 +533,7 @@ func (c *Collector) GetStats() *MetricsStats {
 		UniqueClients:   c.stats.UniqueClients,
 		TopRules:        copyMap(c.stats.TopRules),
 		TopCategories:   copyMap(c.stats.TopCategories),
+		Clients:         copyClients(c.stats.Clients),
 	}
 }
 
@@ -575,6 +601,7 @@ func (c *Collector) ResetStats() {
 		StartTime:     time.Now(),
 		TopRules:      make(map[string]int64),
 		TopCategories: make(map[string]int64),
+		Clients:       make(map[string]*ClientStat),
 	}
 }
 
@@ -596,6 +623,16 @@ func copyMap(m map[string]int64) map[string]int64 {
 	result := make(map[string]int64, len(m))
 	for k, v := range m {
 		result[k] = v
+	}
+	return result
+}
+
+func copyClients(m map[string]*ClientStat) map[string]*ClientStat {
+	result := make(map[string]*ClientStat, len(m))
+	for k, v := range m {
+		// Copy struct value
+		val := *v
+		result[k] = &val
 	}
 	return result
 }

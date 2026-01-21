@@ -103,6 +103,7 @@ type RuleMatch struct {
 	Score     float64 `json:"score"`
 	MatchedOn string  `json:"matched_on"`
 	Pattern   string  `json:"pattern,omitempty"`
+	Payload   string  `json:"payload,omitempty"`
 }
 
 // LoggerStats tracks logger statistics
@@ -382,6 +383,7 @@ func (l *Logger) LogRequest(
 			Score:     match.Score,
 			MatchedOn: match.MatchedOn,
 			Pattern:   match.Pattern,
+			Payload:   match.Value,
 		})
 
 		// Collect unique categories

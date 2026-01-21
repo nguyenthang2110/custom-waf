@@ -132,14 +132,14 @@ func (p *HTTPParser) SetTrustedProxies(proxies []string) {
 }
 
 // isTrustedProxy checks if an IP is in the trusted proxy list
-func (p *HTTPParser) isTrustedProxy(ip string) bool {
-	for _, trustedIP := range p.trustedProxies {
-		if ip == trustedIP {
-			return true
-		}
-	}
-	return false
-}
+// func (p *HTTPParser) isTrustedProxy(ip string) bool {
+// 	for _, trustedIP := range p.trustedProxies {
+// 		if ip == trustedIP {
+// 			return true
+// 		}
+// 	}
+// 	return false
+// }
 
 // GetQueryParams extracts query parameters as a map
 func (p *HTTPParser) GetQueryParams(r *http.Request) map[string][]string {

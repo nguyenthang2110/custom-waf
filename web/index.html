@@ -1,0 +1,1585 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WAF Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .status-dot {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: .5;
+            }
+        }
+
+        /* Modal Styles */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 50;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease;
+        }
+
+        .modal-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .modal-content {
+            background: #1f2937;
+            border-radius: 0.5rem;
+            max-width: 800px;
+            width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+            transform: scale(0.95);
+            transition: transform 0.3s ease;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-overlay.active .modal-content {
+            transform: scale(1);
+        }
+    </style>
+</head>
+
+<body class="bg-gray-900 text-white">
+    <div id="app"></div>
+
+    <!-- Log Details Modal -->
+    <div id="logModal" class="modal-overlay" onclick="if(event.target === this) dashboard.closeLogModal()">
+        <div class="modal-content border border-gray-700">
+            <div class="flex justify-between items-center p-6 border-b border-gray-700 bg-gray-800 rounded-t-lg">
+                <h3 class="text-xl font-bold text-white">Request Details</h3>
+                <button onclick="dashboard.closeLogModal()" class="text-gray-400 hover:text-white">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-6" id="logModalContent">
+                <!-- Content injected via JS -->
+            </div>
+            <div class="p-6 border-t border-gray-700 bg-gray-800 rounded-b-lg flex justify-end">
+                <button onclick="dashboard.closeLogModal()"
+                    class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-semibold">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Authentication check
+        const checkAuth = () => {
+            const token = localStorage.getItem('waf_token');
+            if (!token) {
+                window.location.href = '/login.html';
+                return false;
+            }
+            return true;
+        };
+
+        // Logout function
+        const logout = () => {
+            localStorage.removeItem('waf_token');
+            localStorage.removeItem('waf_user');
+            window.location.href = '/login.html';
+        };
+
+        // Check auth before loading dashboard
+        if (!checkAuth()) {
+            throw new Error('Not authenticated');
+        }
+
+        const API_BASE = '/waf-api';
+
+        class WAFDashboard {
+            constructor() {
+                this.currentTab = 'logs';
+                this.logs = [];
+                this.logsMetadata = { total: 0, page: 1, per_page: 50, total_pages: 1 };
+                this.logsSortBy = 'timestamp';
+                this.logsSortOrder = 'desc';
+                this.logsFilters = {
+                    decision: '',
+                    ip: '',
+                    method: '',
+                    path: ''
+                };
+                this.stats = {};
+                this.ips = [];
+                this.whitelist = [];
+                this.blacklist = [];
+                this.uploadNotification = null;
+                this.selectedFile = null;
+                this.backendURL = 'Loading...';
+                this.wafConfig = null;
+                this.refreshInterval = null;
+                this.init();
+            }
+
+            async init() {
+                await this.loadData();
+                await this.loadBackend();
+                await this.loadWAFConfig();
+                this.render();
+                this.startAutoRefresh();
+            }
+
+            async loadData() {
+                try {
+                    // Load stats
+                    const statsRes = await fetch(`${API_BASE}/stats`);
+                    this.stats = await statsRes.json();
+
+                    // Load logs with current filters/pagination
+                    await this.loadLogsWithFilters();
+
+                    // Load IPs
+                    const ipsRes = await fetch(`${API_BASE}/ips`);
+                    this.ips = await ipsRes.json();
+
+                    // Load whitelist / blacklist
+                    const wlRes = await fetch(`${API_BASE}/whitelist`);
+                    const blRes = await fetch(`${API_BASE}/blacklist`);
+                    this.whitelist = (await wlRes.json()).ips || [];
+                    this.blacklist = (await blRes.json()).ips || [];
+                } catch (error) {
+                    console.error('Failed to load data:', error);
+                }
+            }
+
+            async loadLogsWithFilters() {
+                try {
+                    // Build query string
+                    const params = new URLSearchParams();
+                    params.append('page', this.logsMetadata.page);
+                    params.append('per_page', this.logsMetadata.per_page);
+                    params.append('sort_by', this.logsSortBy);
+                    params.append('sort_order', this.logsSortOrder);
+
+                    if (this.logsFilters.decision) params.append('decision', this.logsFilters.decision);
+                    if (this.logsFilters.ip) params.append('ip', this.logsFilters.ip);
+                    if (this.logsFilters.method) params.append('method', this.logsFilters.method);
+                    if (this.logsFilters.path) params.append('path_contains', this.logsFilters.path);
+
+                    const response = await fetch(`${API_BASE}/logs?${params}`);
+                    const data = await response.json();
+
+                    this.logs = data.logs || [];
+                    this.logsMetadata = data.metadata || { total: 0, page: 1, per_page: 50, total_pages: 1 };
+                } catch (error) {
+                    console.error('Failed to load logs:', error);
+                    this.logs = [];
+                }
+            }
+
+            async loadBackend() {
+                try {
+                    const response = await fetch(`${API_BASE}/backend`);
+                    const data = await response.json();
+                    this.backendURL = data.backend || 'Unknown';
+                } catch (error) {
+                    console.error('Failed to load backend:', error);
+                    this.backendURL = 'Error loading';
+                }
+            }
+
+            startAutoRefresh() {
+                this.refreshInterval = setInterval(() => {
+                    // Don't refresh if user is typing
+                    const activeElement = document.activeElement;
+                    const isTyping = activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA' || activeElement.tagName === 'SELECT');
+
+                    if (!isTyping) {
+                        this.loadData().then(() => this.render());
+                    } else {
+                        // Just load data silently without re-rendering to keep stats fresh in background?
+                        // Or simpler: just skip this cycle
+                        console.log('Skipping refresh while typing...');
+                    }
+                }, 5000); // Refresh every 5 seconds
+            }
+
+            stopAutoRefresh() {
+                if (this.refreshInterval) {
+                    clearInterval(this.refreshInterval);
+                }
+            }
+
+            async manualRefresh() {
+                await this.loadData();
+                this.render();
+            }
+
+            render() {
+                const app = document.getElementById('app');
+                app.innerHTML = `
+                    ${this.renderHeader()}
+                    ${this.renderNavigation()}
+                    <div class="max-w-7xl mx-auto px-6 py-6">
+                        ${this.renderContent()}
+                    </div>
+                `;
+                this.attachEventListeners();
+            }
+
+            renderHeader() {
+                return `
+                    <header class="bg-gray-800 border-b border-gray-700">
+                        <div class="max-w-7xl mx-auto px-6 py-4">
+                            <div class="flex items-center justify-between">
+                                <div class="flex items-center gap-3">
+                                    <svg class="w-8 h-8 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                                    </svg>
+                                    <div>
+                                        <h1 class="text-2xl font-bold">WAF Dashboard</h1>
+                                        <p class="text-sm text-gray-400">Real-time Security Monitoring</p>
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-4">
+                                    <button onclick="dashboard.manualRefresh()" class="flex items-center gap-2 px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg transition">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                        </svg>
+                                        Refresh
+                                    </button>
+                                    <div class="flex items-center gap-2 px-3 py-2 bg-green-900 rounded-lg">
+                                        <div class="w-2 h-2 bg-green-400 rounded-full status-dot"></div>
+                                        <span class="text-sm">Online</span>
+                                    </div>
+                                    <div class="flex items-center gap-3 px-3 py-2 bg-gray-700 rounded-lg">
+                                        <span class="text-sm" id="userInfo">👤 ${JSON.parse(localStorage.getItem('waf_user') || '{"username":"User"}').username}</span>
+                                        <button onclick="logout()" class="text-red-400 hover:text-red-300 text-sm font-semibold">Logout</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+                `;
+            }
+
+            renderNavigation() {
+                const tabs = [
+                    { id: 'logs', label: 'Live Logs' },
+                    { id: 'ips', label: 'IP Addresses' },
+                    { id: 'stats', label: 'Statistics' },
+                    { id: 'access', label: 'Access Control' },
+                    { id: 'rules', label: 'Rules Management' },
+                    { id: 'config', label: 'Configuration' }
+                ];
+
+                return `
+                    <nav class="bg-gray-800 border-b border-gray-700">
+                        <div class="max-w-7xl mx-auto px-6">
+                            <div class="flex gap-1">
+                                ${tabs.map(tab => `
+                                    <button onclick="dashboard.switchTab('${tab.id}')" 
+                                            class="px-6 py-3 font-medium transition ${this.currentTab === tab.id
+                        ? 'text-cyan-400 border-b-2 border-cyan-400 bg-gray-700'
+                        : 'text-gray-400 hover:text-gray-200'
+                    }">
+                                        ${tab.label}
+                                    </button>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </nav>
+                `;
+            }
+
+            renderContent() {
+                switch (this.currentTab) {
+                    case 'logs':
+                        return this.renderLogs();
+                    case 'ips':
+                        return this.renderIPs();
+                    case 'stats':
+                        return this.renderStats();
+                    case 'access':
+                        return this.renderAccessControl();
+                    case 'rules':
+                        return this.renderRulesManagement();
+                    case 'config':
+                        return this.renderConfiguration();
+                    default:
+                        return '';
+                }
+            }
+
+            renderLogs() {
+                const sortIcon = (column) => {
+                    if (this.logsSortBy !== column) return '↕';
+                    return this.logsSortOrder === 'asc' ? '↑' : '↓';
+                };
+
+                return `
+                    <div class="space-y-4">
+                        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                            <!-- Header with Clear Logs -->
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-xl font-bold">Live Logs</h3>
+                                <button onclick="dashboard.clearAllLogs()" class="px-4 py-2 bg-red-600 hover:bg-red-700 rounded text-sm font-semibold">
+                                    Clear All Logs
+                                </button>
+                            </div>
+
+                            <!-- Filters -->
+                            <form onsubmit="dashboard.applyLogsFilters(event)" class="mb-4">
+                                <div class="grid grid-cols-5 gap-3">
+                                    <select onchange="dashboard.logsFilters.decision = this.value" class="px-3 py-2 rounded bg-gray-700 border border-gray-600 text-sm">
+                                        <option value="">All Decisions</option>
+                                        <option value="ALLOW" ${this.logsFilters.decision === 'ALLOW' ? 'selected' : ''}>ALLOW</option>
+                                        <option value="BLOCK" ${this.logsFilters.decision === 'BLOCK' ? 'selected' : ''}>BLOCK</option>
+                                        <option value="CHALLENGE" ${this.logsFilters.decision === 'CHALLENGE' ? 'selected' : ''}>CHALLENGE</option>
+                                    </select>
+                                    <input type="text" placeholder="Filter by IP" value="${this.logsFilters.ip}" oninput="dashboard.logsFilters.ip = this.value" class="px-3 py-2 rounded bg-gray-700 border border-gray-600 text-sm">
+                                    <select onchange="dashboard.logsFilters.method = this.value" class="px-3 py-2 rounded bg-gray-700 border border-gray-600 text-sm">
+                                        <option value="">All Methods</option>
+                                        <option value="GET" ${this.logsFilters.method === 'GET' ? 'selected' : ''}>GET</option>
+                                        <option value="POST" ${this.logsFilters.method === 'POST' ? 'selected' : ''}>POST</option>
+                                        <option value="PUT" ${this.logsFilters.method === 'PUT' ? 'selected' : ''}>PUT</option>
+                                        <option value="DELETE" ${this.logsFilters.method === 'DELETE' ? 'selected' : ''}>DELETE</option>
+                                    </select>
+                                    <input type="text" placeholder="Filter by Path" value="${this.logsFilters.path}" oninput="dashboard.logsFilters.path = this.value" class="px-3 py-2 rounded bg-gray-700 border border-gray-600 text-sm">
+                                    <div class="flex gap-2">
+                                        <button type="submit" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded text-sm font-semibold">Apply</button>
+                                        <button type="button" onclick="dashboard.clearLogsFilters()" class="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded text-sm">Clear</button>
+                                    </div>
+                                </div>
+                            </form>
+
+                            <!-- Results info -->
+                            <div class="mb-2 text-sm text-gray-400">
+                                Showing ${this.logs.length === 0 ? 0 : (this.logsMetadata.page - 1) * this.logsMetadata.per_page + 1}-${Math.min(this.logsMetadata.page * this.logsMetadata.per_page, this.logsMetadata.total)} of ${this.logsMetadata.total} logs
+                            </div>
+
+                            <!-- Table -->
+                            <div class="overflow-x-auto">
+                                <table class="w-full text-sm">
+                                    <thead class="bg-gray-700">
+                                        <tr>
+                                            <th class="px-4 py-3 text-left cursor-pointer hover:bg-gray-600" onclick="dashboard.sortLogsBy('timestamp')">Time ${sortIcon('timestamp')}</th>
+                                            <th class="px-4 py-3 text-left cursor-pointer hover:bg-gray-600" onclick="dashboard.sortLogsBy('client_ip')">Client IP ${sortIcon('client_ip')}</th>
+                                            <th class="px-4 py-3 text-left cursor-pointer hover:bg-gray-600" onclick="dashboard.sortLogsBy('method')">Method ${sortIcon('method')}</th>
+                                            <th class="px-4 py-3 text-left cursor-pointer hover:bg-gray-600" onclick="dashboard.sortLogsBy('path')">Path ${sortIcon('path')}</th>
+                                            <th class="px-4 py-3 text-left cursor-pointer hover:bg-gray-600" onclick="dashboard.sortLogsBy('decision')">Decision ${sortIcon('decision')}</th>
+                                            <th class="px-4 py-3 text-left cursor-pointer hover:bg-gray-600" onclick="dashboard.sortLogsBy('total_score')">Score ${sortIcon('total_score')}</th>
+                                            <th class="px-4 py-3 text-left">Rules</th>
+                                            <th class="px-4 py-3 text-left cursor-pointer hover:bg-gray-600" onclick="dashboard.sortLogsBy('latency_ms')">Latency ${sortIcon('latency_ms')}</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${this.logs.length === 0 ? `
+                                            <tr>
+                                                <td colspan="8" class="px-4 py-8 text-center text-gray-400">
+                                                    No logs found. ${this.logsFilters.decision || this.logsFilters.ip || this.logsFilters.method || this.logsFilters.path ? 'Try different filters.' : 'Waiting for requests...'}
+                                                </td>
+                                            </tr>
+                                        ` : this.logs.map(log => `
+                                            <tr class="border-t border-gray-700 hover:bg-gray-700 cursor-pointer transition-colors" onclick="dashboard.showLogDetails('${log.request_id}')">
+                                                <td class="px-4 py-3">${this.formatTime(log.timestamp)}</td>
+                                                <td class="px-4 py-3 font-mono text-xs">${log.client_ip}</td>
+                                                <td class="px-4 py-3">
+                                                    <span class="px-2 py-1 bg-gray-600 rounded text-xs">${log.method}</span>
+                                                </td>
+                                                <td class="px-4 py-3 text-xs max-w-xs truncate" title="${log.path}">${log.path}</td>
+                                                <td class="px-4 py-3">${this.renderDecisionBadge(log.decision)}</td>
+                                                <td class="px-4 py-3">
+                                                    <span class="font-mono ${log.total_score > 10 ? 'text-red-400' : log.total_score > 5 ? 'text-yellow-400' : 'text-gray-400'}">
+                                                        ${log.total_score.toFixed(1)}
+                                                    </span>
+                                                </td>
+                                                <td class="px-4 py-3">
+                                                    ${log.matched_rules && log.matched_rules.length > 0
+                        ? `<span class="text-xs text-gray-400">${log.matched_rules.length} rules</span>`
+                        : '-'}
+                                                </td>
+                                                <td class="px-4 py-3 text-xs">${log.latency_ms.toFixed(1)}ms</td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <!-- Pagination -->
+                            <div class="flex items-center justify-between mt-4 pt-4 border-t border-gray-700">
+                                <button onclick="dashboard.previousLogsPage()" ${this.logsMetadata.page <= 1 ? 'disabled' : ''} class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
+                                    ◀ Previous
+                                </button>
+                                <span class="text-sm text-gray-400">
+                                    Page ${this.logsMetadata.page} of ${this.logsMetadata.total_pages}
+                                </span>
+                                <button onclick="dashboard.nextLogsPage()" ${this.logsMetadata.page >= this.logsMetadata.total_pages ? 'disabled' : ''} class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
+                                    Next ▶
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            renderIPs() {
+                return `
+                    <div class="space-y-4">
+                        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                            <h3 class="text-xl font-bold mb-4">IP Addresses</h3>
+                            <div class="overflow-x-auto">
+                                <table class="w-full text-sm">
+                                    <thead class="bg-gray-700">
+                                        <tr>
+                                            <th class="px-4 py-3 text-left">IP Address</th>
+                                            <th class="px-4 py-3 text-left">Total Requests</th>
+                                            <th class="px-4 py-3 text-left">Blocked</th>
+                                            <th class="px-4 py-3 text-left">Status</th>
+                                            <th class="px-4 py-3 text-left">Suspicion</th>
+                                            <th class="px-4 py-3 text-left">Attacks</th>
+                                            <th class="px-4 py-3 text-left">Last Seen</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${this.ips.length === 0 ? `
+                                            <tr>
+                                                <td colspan="7" class="px-4 py-8 text-center text-gray-400">
+                                                    No IP data yet
+                                                </td>
+                                            </tr>
+                                        ` : this.ips.map(ip => `
+                                            <tr class="border-t border-gray-700 hover:bg-gray-700">
+                                                <td class="px-4 py-3 font-mono text-xs">${ip.ip}</td>
+                                                <td class="px-4 py-3">${ip.total_requests}</td>
+                                                <td class="px-4 py-3">
+                                                    <span class="${ip.blocked_requests > 0 ? 'text-red-400' : 'text-gray-400'}">
+                                                        ${ip.blocked_requests}
+                                                    </span>
+                                                </td>
+                                                <td class="px-4 py-3">
+                                                    ${ip.is_blocked
+                        ? '<span class="px-2 py-1 bg-red-900 text-red-300 rounded text-xs">BLOCKED</span>'
+                        : ip.blocked_requests > 0
+                            ? '<span class="px-2 py-1 bg-orange-900 text-orange-300 rounded text-xs">WARNING</span>'
+                            : ip.is_suspicious
+                                ? '<span class="px-2 py-1 bg-yellow-900 text-yellow-300 rounded text-xs">SUSPICIOUS</span>'
+                                : '<span class="px-2 py-1 bg-green-900 text-green-300 rounded text-xs">NORMAL</span>'
+                    }
+                                                </td>
+                                                <td class="px-4 py-3">
+                                                    <span class="font-mono ${ip.suspicion_score > 0.7 ? 'text-red-400' : ip.suspicion_score > 0.3 ? 'text-yellow-400' : 'text-gray-400'}">
+                                                        ${(ip.suspicion_score * 100).toFixed(0)}%
+                                                    </span>
+                                                </td>
+                                                <td class="px-4 py-3 text-xs">
+                                                    ${ip.detected_attacks && ip.detected_attacks.length > 0
+                        ? ip.detected_attacks.join(', ')
+                        : '-'}
+                                                </td>
+                                                <td class="px-4 py-3 text-xs">${this.formatTime(ip.last_seen)}</td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            renderStats() {
+                return `
+                    <div class="space-y-6">
+                        <div class="grid md:grid-cols-4 gap-4">
+                            ${this.renderStatCard('Total Requests', this.stats.total_requests || 0, 'blue')}
+                            ${this.renderStatCard('Blocked', this.stats.total_blocked || 0, 'red', `${(this.stats.block_rate || 0).toFixed(2)}%`)}
+                            ${this.renderStatCard('Allowed', this.stats.total_allowed || 0, 'green')}
+                            ${this.renderStatCard('Avg Latency', this.stats.avg_latency || '0s', 'yellow')}
+                        </div>
+
+                        <div class="grid md:grid-cols-2 gap-6">
+                            <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                                <h3 class="text-lg font-bold mb-4">Top Rules</h3>
+                                <div class="space-y-2">
+                                    ${this.stats.top_rules && this.stats.top_rules.length > 0
+                        ? this.stats.top_rules.slice(0, 5).map(rule => `
+                                            <div class="flex justify-between items-center p-3 bg-gray-700 rounded">
+                                                <span class="font-mono text-sm">${rule.rule_id}</span>
+                                                <span class="text-cyan-400 font-bold">${rule.count}</span>
+                                            </div>
+                                        `).join('')
+                        : '<p class="text-gray-400">No rule matches yet</p>'
+                    }
+                                </div>
+                            </div>
+
+                            <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                                <h3 class="text-lg font-bold mb-4">System Info</h3>
+                                <div class="space-y-3">
+                                    <div class="flex justify-between">
+                                        <span class="text-gray-400">Rules Loaded:</span>
+                                        <span class="font-bold">${this.stats.rules_loaded || 0}</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span class="text-gray-400">Unique Clients:</span>
+                                        <span class="font-bold">${this.stats.unique_clients || 0}</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span class="text-gray-400">Uptime:</span>
+                                        <span class="font-bold">${this.stats.uptime || '0s'}</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span class="text-gray-400">Block Rate:</span>
+                                        <span class="font-bold ${(this.stats.block_rate || 0) > 10 ? 'text-red-400' : 'text-green-400'}">
+                                            ${(this.stats.block_rate || 0).toFixed(2)}%
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            renderAccessControl() {
+                return `
+                    <div class="grid md:grid-cols-2 gap-6">
+                        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                            <div class="flex items-center justify-between mb-4">
+                                <div>
+                                    <h3 class="text-xl font-bold">Whitelist</h3>
+                                </div>
+                            </div>
+                            <form class="flex gap-3 mb-4" onsubmit="dashboard.submitWhitelist(event)">
+                                <input name="ip" type="text" placeholder="Nhập IP/CIDR" class="flex-1 px-3 py-2 rounded bg-gray-700 border border-gray-600 text-sm focus:outline-none focus:border-cyan-400">
+                                <button type="submit" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded text-sm font-semibold">Thêm</button>
+                            </form>
+                            <div class="space-y-2">
+                                ${this.whitelist.length === 0 ? `
+                                    <p class="text-gray-400 text-sm">Chưa có IP nào.</p>
+                                ` : this.whitelist.map(ip => `
+                                    <div class="flex items-center justify-between bg-gray-700 rounded px-3 py-2">
+                                        <span class="font-mono text-sm">${ip}</span>
+                                        <button class="text-red-300 text-xs hover:text-red-200" onclick="dashboard.removeWhitelist('${ip}')">Xóa</button>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+
+                        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                            <div class="flex items-center justify-between mb-4">
+                                <div>
+                                    <h3 class="text-xl font-bold">Blacklist</h3>
+                                </div>
+                            </div>
+                            <form class="flex gap-3 mb-4" onsubmit="dashboard.submitBlacklist(event)">
+                                <input name="ip" type="text" placeholder="Nhập IP/CIDR" class="flex-1 px-3 py-2 rounded bg-gray-700 border border-gray-600 text-sm focus:outline-none focus:border-red-400">
+                                <button type="submit" class="px-4 py-2 bg-red-600 hover:bg-red-700 rounded text-sm font-semibold">Thêm</button>
+                            </form>
+                            <div class="space-y-2">
+                                ${this.blacklist.length === 0 ? `
+                                    <p class="text-gray-400 text-sm">Chưa có IP nào.</p>
+                                ` : this.blacklist.map(ip => `
+                                    <div class="flex items-center justify-between bg-gray-700 rounded px-3 py-2">
+                                        <span class="font-mono text-sm">${ip}</span>
+                                        <button class="text-red-300 text-xs hover:text-red-200" onclick="dashboard.removeBlacklist('${ip}')">Xóa</button>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            renderRulesManagement() {
+                return `
+                    <div class="space-y-6">
+                        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                            <div class="flex items-center justify-between mb-6">
+                                <div>
+                                    <h3 class="text-2xl font-bold mb-2">Upload Rule File</h3>
+                                    <p class="text-sm text-gray-400">Upload a new rules JSON file to update WAF rules without restart</p>
+                                </div>
+                                <div class="text-right">
+                                    <div class="text-sm text-gray-400">Current Rules</div>
+                                    <div class="text-3xl font-bold text-cyan-400">${this.stats.rules_loaded || 0}</div>
+                                </div>
+                            </div>
+
+                            <!-- Upload Form -->
+                            <div class="border-2 border-dashed border-gray-600 rounded-lg p-8 text-center hover:border-cyan-500 transition">
+                                <svg class="w-16 h-16 mx-auto text-gray-500 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                </svg>
+                                <p class="text-lg font-medium mb-2">Drop your rules JSON file here</p>
+                                <p class="text-sm text-gray-400 mb-4">or click to browse</p>
+                                
+                                <input type="file" id="ruleFileInput" accept=".json" class="hidden" onchange="dashboard.handleFileSelect(event)">
+                                <button onclick="document.getElementById('ruleFileInput').click()" 
+                                        class="px-6 py-3 bg-cyan-600 hover:bg-cyan-700 rounded-lg font-semibold transition">
+                                    Choose File
+                                </button>
+
+                                <div id="fileInfo" class="mt-4">${this.selectedFile ? `
+                                    <div class="p-4 bg-gray-700 border border-gray-600 rounded-lg">
+                                        <div class="flex items-center justify-between gap-4">
+                                            <div class="text-left">
+                                                <p class="font-semibold">${this.selectedFile.name}</p>
+                                                <p class="text-sm text-gray-400">${(this.selectedFile.size / 1024).toFixed(2)} KB</p>
+                                            </div>
+                                            <button onclick="dashboard.uploadRulesFile()" 
+                                                    class="px-6 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-semibold transition flex items-center gap-2">
+                                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                                                </svg>
+                                                Upload & Apply
+                                            </button>
+                                        </div>
+                                    </div>
+                                ` : ''}</div>
+                                <div id="uploadStatus" class="mt-4">${this.uploadNotification || ''}</div>
+                            </div>
+
+                            <!-- Backup Info -->
+                            <div class="mt-6 p-4 bg-gray-700 rounded-lg">
+                                <div class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-cyan-400 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                    <div class="text-sm">
+                                        <p class="font-semibold text-cyan-400 mb-1">Automatic Backup</p>
+                                        <p class="text-gray-300">Current rules will be automatically backed up to <code class="bg-gray-600 px-1 rounded">configs/rules/backups/</code> before applying new rules.</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            renderConfiguration() {
+                return `
+                    <div class="space-y-6">
+                        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                            <div class="mb-6">
+                                <h3 class="text-2xl font-bold mb-2">Backend Server Configuration</h3>
+                                <p class="text-sm text-gray-400">Configure the upstream web server that WAF will protect</p>
+                            </div>
+                            <div class="bg-gray-700 rounded-lg p-4 mb-6">
+                                <div class="flex items-center justify-between">
+                                    <div>
+                                        <div class="text-sm text-gray-400 mb-1">Current Backend Server</div>
+                                        <div class="text-lg font-mono text-cyan-400">${this.backendURL}</div>
+                                    </div>
+                                    <svg class="w-8 h-8 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" />
+                                    </svg>
+                                </div>
+                            </div>
+                            <form onsubmit="dashboard.updateBackend(event)" class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-medium mb-2">New Backend URL</label>
+                                    <input type="text" name="backend_url" placeholder="http://localhost:8000" value="${this.backendURL !== 'Loading...' && this.backendURL !== 'Error loading' && this.backendURL !== 'Unknown' ? this.backendURL : ''}" required class="w-full px-4 py-3 rounded-lg bg-gray-700 border border-gray-600 text-white focus:outline-none focus:border-cyan-400 font-mono">
+                                    <p class="text-xs text-gray-400 mt-2">Example: http://localhost:8000, https://example.com</p>
+                                </div>
+                                <button type="submit" class="w-full px-6 py-3 bg-cyan-600 hover:bg-cyan-700 rounded-lg font-semibold transition flex items-center justify-center gap-2">
+                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                    </svg>
+                                    Update Backend Server
+                                </button>
+                            </form>
+                            <div class="mt-6 p-4 bg-blue-900/30 border border-blue-700 rounded-lg">
+                                <div class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-blue-400 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                    <div class="text-sm">
+                                        <p class="font-semibold text-blue-400 mb-1">Dynamic Configuration</p>
+                                        <p class="text-gray-300">The backend server can be updated without restarting the WAF. All future requests will be proxied to the new backend immediately.</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- WAF Configuration Settings -->
+                        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                            <div class="mb-6">
+                                <h3 class="text-2xl font-bold mb-2">WAF Settings</h3>
+                                <p class="text-sm text-gray-400">Configure WAF thresholds and rate limits</p>
+                            </div>
+
+                            <!-- Current Settings Display -->
+                            <div class="grid md:grid-cols-2 gap-4 mb-6">
+                                <div class="bg-gray-700 rounded-lg p-4">
+                                    <div class="text-sm text-gray-400 mb-1">Block Threshold</div>
+                                    <div class="text-2xl font-bold text-red-400">${this.wafConfig ? this.wafConfig.decision.block_threshold.toFixed(1) : '5.0'}</div>
+                                </div>
+                                <div class="bg-gray-700 rounded-lg p-4">
+                                    <div class="text-sm text-gray-400 mb-1">Challenge Threshold</div>
+                                    <div class="text-2xl font-bold text-yellow-400">${this.wafConfig ? this.wafConfig.decision.challenge_threshold.toFixed(1) : '4.0'}</div>
+                                </div>
+                                <div class="bg-gray-700 rounded-lg p-4">
+                                    <div class="text-sm text-gray-400 mb-1">Requests Per Minute</div>
+                                    <div class="text-2xl font-bold text-cyan-400">${this.wafConfig ? this.wafConfig.rate_limit.requests_per_min : '100'}</div>
+                                </div>
+                                <div class="bg-gray-700 rounded-lg p-4">
+                                    <div class="text-sm text-gray-400 mb-1">Burst Size</div>
+                                    <div class="text-2xl font-bold text-green-400">${this.wafConfig ? this.wafConfig.rate_limit.burst_size : '20'}</div>
+                                </div>
+                            </div>
+
+                            <!-- Configuration Form -->
+                            <form onsubmit="dashboard.updateWAFConfig(event)" class="space-y-6">
+                                <!-- Decision Thresholds -->
+                                <div class="border border-gray-600 rounded-lg p-4">
+                                    <h4 class="font-bold mb-4 text-lg">Decision Thresholds</h4>
+                                    <div class="grid md:grid-cols-2 gap-4">
+                                        <div>
+                                            <label class="block text-sm font-medium mb-2">
+                                                Block Threshold
+                                                <span class="text-gray-400 text-xs ml-1">(Score >= this → BLOCK)</span>
+                                            </label>
+                                            <input 
+                                                type="number"
+                                                step="0.1"
+                                                min="0"
+                                                max="100"
+                                                name="block_threshold"
+                                                value="${this.wafConfig ? this.wafConfig.decision.block_threshold : '5.0'}"
+                                                required
+                                                class="w-full px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:outline-none focus:border-red-400"
+                                            >
+                                            <p class="text-xs text-gray-400 mt-1">Range: 0.0 - 100.0</p>
+                                        </div>
+                                        <div>
+                                            <label class="block text-sm font-medium mb-2">
+                                                Challenge Threshold
+                                                <span class="text-gray-400 text-xs ml-1">(Score >= this → CHALLENGE)</span>
+                                            </label>
+                                            <input 
+                                                type="number"
+                                                step="0.1"
+                                                min="0"
+                                                max="100"
+                                                name="challenge_threshold"
+                                                value="${this.wafConfig ? this.wafConfig.decision.challenge_threshold : '4.0'}"
+                                                required
+                                                class="w-full px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:outline-none focus:border-yellow-400"
+                                            >
+                                            <p class="text-xs text-gray-400 mt-1">Must be less than Block Threshold</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Rate Limiting -->
+                                <div class="border border-gray-600 rounded-lg p-4">
+                                    <h4 class="font-bold mb-4 text-lg">Rate Limiting</h4>
+                                    <div class="grid md:grid-cols-2 gap-4">
+                                        <div>
+                                            <label class="block text-sm font-medium mb-2">
+                                                Requests Per Minute
+                                                <span class="text-gray-400 text-xs ml-1">(Per IP)</span>
+                                            </label>
+                                            <input 
+                                                type="number"
+                                                min="1"
+                                                max="10000"
+                                                name="requests_per_min"
+                                                value="${this.wafConfig ? this.wafConfig.rate_limit.requests_per_min : '100'}"
+                                                required
+                                                class="w-full px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:outline-none focus:border-cyan-400"
+                                            >
+                                            <p class="text-xs text-gray-400 mt-1">Range: 1 - 10000</p>
+                                        </div>
+                                        <div>
+                                            <label class="block text-sm font-medium mb-2">
+                                                Burst Size
+                                                <span class="text-gray-400 text-xs ml-1">(Burst allowance)</span>
+                                            </label>
+                                            <input 
+                                                type="number"
+                                                min="1"
+                                                max="1000"
+                                                name="burst_size"
+                                                value="${this.wafConfig ? this.wafConfig.rate_limit.burst_size : '20'}"
+                                                required
+                                                class="w-full px-4 py-2 rounded-lg bg-gray-700 border border-gray-600 text-white focus:outline-none focus:border-green-400"
+                                            >
+                                            <p class="text-xs text-gray-400 mt-1">Range: 1 - 1000</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Submit Button -->
+                                <button 
+                                    type="submit"
+                                    class="w-full px-6 py-3 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 rounded-lg font-semibold transition flex items-center justify-center gap-2">
+                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                    Apply Changes
+                                </button>
+                            </form>
+                            
+                            <!-- Endpoint Specific Rate Limits -->
+                            <div class="mt-8 border-t border-gray-700 pt-6">
+                                <h4 class="font-bold mb-4 text-lg">Endpoint Specific Limits</h4>
+                                <p class="text-sm text-gray-400 mb-4">Override global rate limits for specific paths.</p>
+                                
+                                <!-- Add Endpoint Form -->
+                                <form onsubmit="dashboard.addEndpointLimit(event)" class="flex gap-3 mb-4 items-end">
+                                    <div class="flex-1">
+                                        <label class="block text-xs font-medium text-gray-400 mb-1">Path</label>
+                                        <input name="path" type="text" placeholder="/api/login" required class="w-full px-3 py-2 rounded bg-gray-700 border border-gray-600 text-sm focus:outline-none focus:border-cyan-400 font-mono">
+                                    </div>
+                                    <div class="w-24">
+                                        <label class="block text-xs font-medium text-gray-400 mb-1">RPM</label>
+                                        <input name="rpm" type="number" min="1" placeholder="60" required class="w-full px-3 py-2 rounded bg-gray-700 border border-gray-600 text-sm focus:outline-none focus:border-cyan-400">
+                                    </div>
+                                    <div class="w-24">
+                                        <label class="block text-xs font-medium text-gray-400 mb-1">Burst</label>
+                                        <input name="burst" type="number" min="1" placeholder="10" required class="w-full px-3 py-2 rounded bg-gray-700 border border-gray-600 text-sm focus:outline-none focus:border-cyan-400">
+                                    </div>
+                                    <button type="submit" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded text-sm font-semibold h-[38px]">Add</button>
+                                </form>
+
+                                <!-- Endpoints Table -->
+                                <div class="bg-gray-700 rounded-lg overflow-hidden">
+                                    <table class="w-full text-sm">
+                                        <thead class="bg-gray-600">
+                                            <tr>
+                                                <th class="px-4 py-2 text-left">Path</th>
+                                                <th class="px-4 py-2 text-left">RPM</th>
+                                                <th class="px-4 py-2 text-left">Burst</th>
+                                                <th class="px-4 py-2 text-right">Action</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody class="divide-y divide-gray-600">
+                                            ${!this.wafConfig || !this.wafConfig.rate_limit.endpoint_limits || Object.keys(this.wafConfig.rate_limit.endpoint_limits).length === 0 ? `
+                                                <tr>
+                                                    <td colspan="4" class="px-4 py-4 text-center text-gray-400">No endpoint specific limits configured.</td>
+                                                </tr>
+                                            ` : Object.entries(this.wafConfig.rate_limit.endpoint_limits).map(([path, limit]) => `
+                                                <tr class="hover:bg-gray-600/50">
+                                                    <td class="px-4 py-2 font-mono">${path}</td>
+                                                    <td class="px-4 py-2">${limit.requests_per_min}</td>
+                                                    <td class="px-4 py-2">${limit.burst_size}</td>
+                                                    <td class="px-4 py-2 text-right">
+                                                        <button onclick="dashboard.removeEndpointLimit('${path}')" class="text-red-400 hover:text-red-300 text-xs">Remove</button>
+                                                    </td>
+                                                </tr>
+                                            `).join('')}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <!-- Info Box -->
+                            <div class="mt-6 p-4 bg-yellow-900/30 border border-yellow-700 rounded-lg">
+                                <div class="flex items-start gap-3">
+                                    <svg class="w-5 h-5 text-yellow-400 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                                    </svg>
+                                    <div class="text-sm">
+                                        <p class="font-semibold text-yellow-400 mb-1">Immediate Effect</p>
+                                        <p class="text-gray-300">Changes take effect immediately without restart. Lower thresholds = stricter protection.</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="bg-gray-800 rounded-lg border border-gray-700 p-6">
+                            <h3 class="text-xl font-bold mb-4">System Information</h3>
+                            <div class="grid md:grid-cols-2 gap-4">
+                                <div class="bg-gray-700 rounded-lg p-4">
+                                    <div class="text-sm text-gray-400 mb-1">WAF Status</div>
+                                    <div class="flex items-center gap-2">
+                                        <div class="w-2 h-2 bg-green-400 rounded-full status-dot"></div>
+                                        <span class="text-lg font-bold text-green-400">Active</span>
+                                    </div>
+                                </div>
+                                <div class="bg-gray-700 rounded-lg p-4">
+                                    <div class="text-sm text-gray-400 mb-1">Total Rules Loaded</div>
+                                    <div class="text-lg font-bold text-cyan-400">${this.stats.rules_loaded || 0}</div>
+                                </div>
+                                <div class="bg-gray-700 rounded-lg p-4">
+                                    <div class="text-sm text-gray-400 mb-1">Total Requests</div>
+                                    <div class="text-lg font-bold">${this.stats.total_requests || 0}</div>
+                                </div>
+                                <div class="bg-gray-700 rounded-lg p-4">
+                                    <div class="text-sm text-gray-400 mb-1">Uptime</div>
+                                    <div class="text-lg font-bold">${this.stats.uptime || '0s'}</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            renderStatCard(label, value, color, subtext = '') {
+                const colors = {
+                    blue: 'bg-blue-900 border-blue-700 text-blue-300',
+                    red: 'bg-red-900 border-red-700 text-red-300',
+                    green: 'bg-green-900 border-green-700 text-green-300',
+                    yellow: 'bg-yellow-900 border-yellow-700 text-yellow-300'
+                };
+
+                return `
+                    <div class="bg-gray-800 rounded-lg border ${colors[color]} p-6">
+                        <div class="text-sm text-gray-400 mb-2">${label}</div>
+                        <div class="text-3xl font-bold">${value}</div>
+                        ${subtext ? `<div class="text-sm mt-1">${subtext}</div>` : ''}
+                    </div>
+                `;
+            }
+
+            renderDecisionBadge(decision) {
+                const badges = {
+                    'BLOCK': '<span class="px-2 py-1 bg-red-900 text-red-300 rounded text-xs font-bold">BLOCK</span>',
+                    'ALLOW': '<span class="px-2 py-1 bg-green-900 text-green-300 rounded text-xs font-bold">ALLOW</span>',
+                    'CHALLENGE': '<span class="px-2 py-1 bg-yellow-900 text-yellow-300 rounded text-xs font-bold">CHALLENGE</span>',
+                    'LOG': '<span class="px-2 py-1 bg-blue-900 text-blue-300 rounded text-xs font-bold">LOG</span>'
+                };
+                return badges[decision] || decision;
+            }
+
+            formatTime(timestamp) {
+                const date = new Date(timestamp);
+                return date.toLocaleTimeString();
+            }
+
+            switchTab(tab) {
+                this.currentTab = tab;
+                this.uploadNotification = null;
+                this.render();
+            }
+
+            async submitWhitelist(event) {
+                event.preventDefault();
+                const ip = event.target.ip.value.trim();
+                if (!ip) return;
+                await this.addWhitelist(ip);
+                event.target.reset();
+            }
+
+            async submitBlacklist(event) {
+                event.preventDefault();
+                const ip = event.target.ip.value.trim();
+                if (!ip) return;
+                await this.addBlacklist(ip);
+                event.target.reset();
+            }
+
+            async addWhitelist(ip) {
+                await fetch(`${API_BASE}/whitelist`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip })
+                });
+                await this.manualRefresh();
+            }
+
+            async removeWhitelist(ip) {
+                await fetch(`${API_BASE}/whitelist`, {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip })
+                });
+                await this.manualRefresh();
+            }
+
+            async addBlacklist(ip) {
+                await fetch(`${API_BASE}/blacklist`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip })
+                });
+                await this.manualRefresh();
+            }
+
+            async removeBlacklist(ip) {
+                await fetch(`${API_BASE}/blacklist`, {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ip })
+                });
+                await this.manualRefresh();
+            }
+
+            async clearAllLogs() {
+                if (!confirm('Are you sure you want to clear all logs? This cannot be undone.')) {
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`${API_BASE}/logs/clear`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+
+                    if (response.ok) {
+                        await this.loadLogsWithFilters();
+                        this.render();
+                        this.showPopupNotification('success', 'Success', 'All logs cleared successfully!', null);
+                    } else {
+                        throw new Error('Failed to clear logs');
+                    }
+                } catch (error) {
+                    console.error('Failed to clear logs:', error);
+                    this.showPopupNotification('error', 'Error', 'Failed to clear logs: ' + error.message, null);
+                }
+            }
+
+            async sortLogsBy(column) {
+                if (this.logsSortBy === column) {
+                    // Toggle order if same column
+                    this.logsSortOrder = this.logsSortOrder === 'asc' ? 'desc' : 'asc';
+                } else {
+                    // New column, default to descending
+                    this.logsSortBy = column;
+                    this.logsSortOrder = 'desc';
+                }
+
+                await this.loadLogsWithFilters();
+                this.render();
+            }
+
+            async applyLogsFilters(event) {
+                if (event) event.preventDefault();
+
+                // Reset to page 1 when applying new filters
+                this.logsMetadata.page = 1;
+
+                await this.loadLogsWithFilters();
+                this.render();
+            }
+
+            async clearLogsFilters() {
+                this.logsFilters = {
+                    decision: '',
+                    ip: '',
+                    method: '',
+                    path: ''
+                };
+                this.logsMetadata.page = 1;
+
+                await this.loadLogsWithFilters();
+                this.render();
+            }
+
+            async nextLogsPage() {
+                if (this.logsMetadata.page < this.logsMetadata.total_pages) {
+                    this.logsMetadata.page++;
+                    await this.loadLogsWithFilters();
+                    this.render();
+                }
+            }
+
+            async previousLogsPage() {
+                if (this.logsMetadata.page > 1) {
+                    this.logsMetadata.page--;
+                    await this.loadLogsWithFilters();
+                    this.render();
+                }
+            }
+
+
+            handleFileSelect(event) {
+                const file = event.target.files[0];
+                if (!file) return;
+
+                // Clear notification
+                this.uploadNotification = null;
+
+                // Validate file
+                if (!file.name.endsWith('.json')) {
+                    this.selectedFile = null;
+                    this.uploadNotification = `
+                        <div class="p-4 bg-red-900 border border-red-700 rounded-lg text-red-200">
+                            <strong>Error:</strong> File must be a JSON file
+                        </div>
+                    `;
+                    this.render();
+                    return;
+                }
+
+                // Store selected file
+                this.selectedFile = file;
+                this.render();
+            }
+
+            async uploadRulesFile() {
+                if (!this.selectedFile) return;
+
+                // Show loading in state
+                this.uploadNotification = `
+                    <div class="p-4 bg-blue-900 border border-blue-700 rounded-lg text-blue-200">
+                        <div class="flex items-center gap-3">
+                            <svg class="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            <span>Uploading and validating rules...</span>
+                        </div>
+                    </div>
+                `;
+                this.render();
+
+                try {
+                    const formData = new FormData();
+                    formData.append('rules', this.selectedFile);
+
+                    const response = await fetch(`${API_BASE}/rules/upload`, {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    const result = await response.json();
+
+                    if (result.success) {
+                        // Show popup notification
+                        this.showPopupNotification(
+                            'success',
+                            'Upload Successful!',
+                            `Successfully loaded ${result.rules_loaded} rules. ${result.backup_path ? 'Previous rules backed up.' : ''}`,
+                            result.rules_loaded
+                        );
+
+                        // Clear uploaded notification in upload section
+                        this.uploadNotification = null;
+                        this.selectedFile = null;
+
+                        // Refresh stats to update rule count
+                        await this.loadData();
+                        this.render();
+
+                        // Clear file input
+                        const fileInput = document.getElementById('ruleFileInput');
+                        if (fileInput) fileInput.value = '';
+                    } else {
+                        this.uploadNotification = `
+                            <div class="p-4 bg-red-900 border border-red-700 rounded-lg text-red-200">
+                                <div class="flex items-start gap-3">
+                                    <svg class="w-6 h-6 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                    <div>
+                                        <p class="font-semibold mb-1">Upload Failed</p>
+                                        <p>${result.message}</p>
+                                        ${result.errors && result.errors.length > 0 ? `
+                                            <ul class="text-sm mt-2 list-disc list-inside">
+                                                ${result.errors.map(err => `<li>${err}</li>`).join('')}
+                                            </ul>
+                                        ` : ''}
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        this.render();
+                    }
+                } catch (error) {
+                    this.uploadNotification = `
+                        <div class="p-4 bg-red-900 border border-red-700 rounded-lg text-red-200">
+                            <p class="font-semibold mb-1">Error</p>
+                            <p>Failed to upload file: ${error.message}</p>
+                        </div>
+                    `;
+                    this.render();
+                }
+            }
+
+            showPopupNotification(type, title, message, ruleCount) {
+                // Create popup element
+                const popup = document.createElement('div');
+                popup.className = 'fixed top-4 right-4 z-50 animate-slide-in';
+                popup.style.animation = 'slideIn 0.3s ease-out';
+
+                const bgColor = type === 'success' ? 'bg-green-600' : 'bg-red-600';
+                const icon = type === 'success' ? `
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                ` : `
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                `;
+
+                popup.innerHTML = `
+                    <div class="${bgColor} text-white rounded-lg shadow-2xl p-6 max-w-md">
+                        <div class="flex items-start gap-4">
+                            <div class="flex-shrink-0">
+                                ${icon}
+                            </div>
+                            <div class="flex-1">
+                                <h3 class="text-lg font-bold mb-1">${title}</h3>
+                                <p class="text-sm opacity-90">${message}</p>
+                                ${ruleCount ? `
+                                    <div class="mt-3 pt-3 border-t border-white/20">
+                                        <div class="flex items-center justify-between">
+                                            <span class="text-sm">Total Rules Loaded:</span>
+                                            <span class="text-2xl font-bold">${ruleCount}</span>
+                                        </div>
+                                    </div>
+                                ` : ''}
+                            </div>
+                            <button onclick="this.parentElement.parentElement.remove()" class="flex-shrink-0 text-white/80 hover:text-white">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                `;
+
+                // Add animation styles
+                const style = document.createElement('style');
+                if (!document.getElementById('popup-animation-styles')) {
+                    style.id = 'popup-animation-styles';
+                    style.textContent = `
+                        @keyframes slideIn {
+                            from {
+                                transform: translateX(100%);
+                                opacity: 0;
+                            }
+                            to {
+                                transform: translateX(0);
+                                opacity: 1;
+                            }
+                        }
+                        @keyframes slideOut {
+                            from {
+                                transform: translateX(0);
+                                opacity: 1;
+                            }
+                            to {
+                                transform: translateX(100%);
+                                opacity: 0;
+                            }
+                        }
+                    `;
+                    document.head.appendChild(style);
+                }
+
+                // Add to body
+                document.body.appendChild(popup);
+
+                // Auto remove after 5 seconds
+                setTimeout(() => {
+                    popup.style.animation = 'slideOut 0.3s ease-in';
+                    setTimeout(() => popup.remove(), 300);
+                }, 5000);
+            }
+
+
+            async loadWAFConfig() {
+                try {
+                    const response = await fetch(`${API_BASE}/config`);
+                    const data = await response.json();
+                    this.wafConfig = data;
+                } catch (error) {
+                    console.error('Failed to load WAF config:', error);
+                    this.wafConfig = null;
+                }
+            }
+
+            async updateWAFConfig(event) {
+                event.preventDefault();
+                const formData = new FormData(event.target);
+
+                const config = {
+                    decision: {
+                        block_threshold: parseFloat(formData.get('block_threshold')),
+                        challenge_threshold: parseFloat(formData.get('challenge_threshold'))
+                    },
+                    rate_limit: {
+                        requests_per_min: parseInt(formData.get('requests_per_min')),
+                        burst_size: parseInt(formData.get('burst_size')),
+                        endpoint_limits: this.wafConfig.rate_limit.endpoint_limits || {}
+                    }
+                };
+
+                // Validate
+                if (config.decision.challenge_threshold >= config.decision.block_threshold) {
+                    this.showPopupNotification(
+                        'error',
+                        'Invalid Configuration',
+                        'Challenge threshold must be less than block threshold',
+                        null
+                    );
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`${API_BASE}/config`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(config)
+                    });
+
+                    const result = await response.json();
+
+                    if (result.success) {
+                        this.wafConfig = result.config;
+                        this.showPopupNotification(
+                            'success',
+                            'Configuration Updated!',
+                            `Block: ${config.decision.block_threshold}, Challenge: ${config.decision.challenge_threshold}, RPM: ${config.rate_limit.requests_per_min}`,
+                            null
+                        );
+                        this.render();
+                    } else {
+                        this.showPopupNotification(
+                            'error',
+                            'Update Failed',
+                            result.message || 'Failed to update configuration',
+                            null
+                        );
+                    }
+                } catch (error) {
+                    this.showPopupNotification(
+                        'error',
+                        'Error',
+                        `Failed to update configuration: ${error.message}`,
+                        null
+                    );
+                }
+            }
+
+            async addEndpointLimit(event) {
+                event.preventDefault();
+                const path = event.target.path.value.trim();
+                const rpm = parseInt(event.target.rpm.value);
+                const burst = parseInt(event.target.burst.value);
+
+                if (!path || !rpm || !burst) return;
+
+                // Update local config
+                if (!this.wafConfig.rate_limit.endpoint_limits) {
+                    this.wafConfig.rate_limit.endpoint_limits = {};
+                }
+                this.wafConfig.rate_limit.endpoint_limits[path] = {
+                    requests_per_min: rpm,
+                    burst_size: burst
+                };
+
+                // Sync with server
+                await this.syncConfig('Endpoint limit added');
+                event.target.reset();
+            }
+
+            async removeEndpointLimit(path) {
+                if (!confirm(`Are you sure you want to remove limits for ${path}?`)) return;
+
+                if (this.wafConfig.rate_limit.endpoint_limits && this.wafConfig.rate_limit.endpoint_limits[path]) {
+                    delete this.wafConfig.rate_limit.endpoint_limits[path];
+                    await this.syncConfig('Endpoint limit removed');
+                }
+            }
+
+            async syncConfig(successMessage) {
+                try {
+                    const response = await fetch(`${API_BASE}/config`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(this.wafConfig)
+                    });
+
+                    const result = await response.json();
+
+                    if (result.success) {
+                        this.wafConfig = result.config || this.wafConfig; // Use returned config if available, otherwise keep local (but usually we reload)
+                        // Reload config to be sure
+                        await this.loadWAFConfig();
+
+                        this.showPopupNotification(
+                            'success',
+                            'Configuration Updated',
+                            successMessage || 'Settings saved successfully',
+                            null
+                        );
+                        this.render();
+                    } else {
+                        this.showPopupNotification('error', 'Update Failed', result.message, null);
+                    }
+                } catch (error) {
+                    this.showPopupNotification('error', 'Error', error.message, null);
+                }
+            }
+            async updateBackend(event) {
+                event.preventDefault();
+                const backendURL = event.target.backend_url.value.trim();
+
+                if (!backendURL) return;
+
+                // Validate URL format
+                try {
+                    new URL(backendURL);
+                } catch (e) {
+                    this.showPopupNotification(
+                        'error',
+                        'Invalid URL',
+                        'Please enter a valid URL (e.g., http://localhost:8000)',
+                        null
+                    );
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`${API_BASE}/backend`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ backend_url: backendURL })
+                    });
+
+                    const result = await response.json();
+
+                    if (result.success) {
+                        this.backendURL = result.backend;
+                        this.showPopupNotification(
+                            'success',
+                            'Backend Updated!',
+                            `Successfully updated backend to: ${result.backend}`,
+                            null
+                        );
+                        this.render();
+                    } else {
+                        this.showPopupNotification(
+                            'error',
+                            'Update Failed',
+                            result.message || 'Failed to update backend server',
+                            null
+                        );
+                    }
+                } catch (error) {
+                    this.showPopupNotification(
+                        'error',
+                        'Error',
+                        `Failed to update backend: ${error.message}`,
+                        null
+                    );
+                }
+            }
+
+
+            // --- Log Details Modal ---
+
+            showLogDetails(requestId) {
+                const log = this.logs.find(l => l.request_id === requestId);
+                if (!log) return;
+
+                const content = document.getElementById('logModalContent');
+
+                // Helper for labeled value
+                const field = (label, value, className = '') => `
+                    <div class="mb-4">
+                        <div class="text-xs text-gray-400 uppercase tracking-wide mb-1">${label}</div>
+                        <div class="font-mono text-sm break-all ${className}">${value !== undefined && value !== null ? value : '-'}</div>
+                    </div>
+                `;
+
+                // Helper for section header
+                const section = (title) => `
+                    <div class="border-b border-gray-700 pb-2 mb-4 mt-2">
+                        <h4 class="text-cyan-400 font-bold uppercase text-xs tracking-wider">${title}</h4>
+                    </div>
+                `;
+
+                content.innerHTML = `
+                    <div class="grid grid-cols-2 gap-6">
+                        <div>
+                            ${section('General Info')}
+                            ${field('Timestamp', this.formatTime(log.timestamp))}
+                            ${field('Request ID', log.request_id)}
+                            ${field('Client IP', log.client_ip)}
+                            ${field('Method', log.method, 'font-bold text-white')}
+                        </div>
+                        <div>
+                            ${section('Decision')}
+                            ${field('Type', this.renderDecisionBadge(log.decision))}
+                            ${field('Total Score', log.total_score.toFixed(2), log.total_score > 0 ? (log.total_score > 5 ? 'text-red-400' : 'text-yellow-400') : 'text-green-400')}
+                            ${field('Latency', log.latency_ms + ' ms')}
+                            ${field('Response Status', log.response_status)}
+                        </div>
+                    </div>
+
+                    ${section('Request Details')}
+                    <div class="grid grid-cols-1 gap-4">
+                        ${field('Path', log.path)}
+                        ${field('Query', log.query || '<span class="text-gray-500 italic">None</span>')}
+                        ${field('User Agent', log.user_agent || '<span class="text-gray-500 italic">Unknown</span>')}
+                    </div>
+
+                    ${section('Security Analysis')}
+                    
+                    ${log.matched_rules && log.matched_rules.length > 0 ? `
+                        <div class="bg-gray-800 rounded border border-gray-700 overflow-hidden">
+                            <table class="w-full text-sm">
+                                <thead class="bg-gray-700">
+                                    <tr>
+                                        <th class="px-3 py-2 text-left text-xs">Rule ID</th>
+                                        <th class="px-3 py-2 text-left text-xs">Category</th>
+                                        <th class="px-3 py-2 text-left text-xs">Payload</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-gray-700">
+                                    ${log.matched_rules.map(rule => `
+                                        <tr>
+                                            <td class="px-3 py-2 font-mono text-cyan-300">${rule.rule_id}</td>
+                                            <td class="px-3 py-2 text-gray-400">${rule.category}</td>
+                                            <td class="px-3 py-2 text-gray-300 break-all font-mono text-xs bg-gray-900/50 p-1 rounded">${rule.payload ? rule.payload.replace(/</g, '&lt;').replace(/>/g, '&gt;') : '-'}</td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    ` : `
+                        <div class="p-3 bg-green-900/20 border border-green-900/50 rounded text-green-400 text-sm flex items-center gap-2">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                            No rules matched. Safe request.
+                        </div>
+                    `}
+                `;
+
+                document.getElementById('logModal').classList.add('active');
+            }
+
+            closeLogModal() {
+                document.getElementById('logModal').classList.remove('active');
+            }
+
+            attachEventListeners() {
+                // Event listeners are attached via onclick attributes
+            }
+        }
+
+        // Initialize dashboard
+        const dashboard = new WAFDashboard();
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            dashboard.stopAutoRefresh();
+        });
+    </script>
+</body>
+
+</html>

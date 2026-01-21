@@ -8,8 +8,10 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	"waf-project/internal/api"
 	"waf-project/internal/audit"
 	"waf-project/internal/behavior"
 	"waf-project/internal/decision"
@@ -40,8 +42,10 @@ type WAFConfig struct {
 
 // WAFMiddleware is the main WAF HTTP middleware
 type WAFMiddleware struct {
-	config *WAFConfig
-	proxy  *httputil.ReverseProxy
+	config     *WAFConfig
+	proxy      *httputil.ReverseProxy
+	backendURL string
+	mu         sync.RWMutex // Protects proxy and backendURL
 }
 
 // responseWriter wraps http.ResponseWriter to capture response details
@@ -71,8 +75,9 @@ func NewWAF(config *WAFConfig) *WAFMiddleware {
 	}
 
 	waf := &WAFMiddleware{
-		config: config,
-		proxy:  httputil.NewSingleHostReverseProxy(upstreamURL),
+		config:     config,
+		proxy:      httputil.NewSingleHostReverseProxy(upstreamURL),
+		backendURL: config.Upstream,
 	}
 
 	// Customize proxy error handler
@@ -84,6 +89,17 @@ func NewWAF(config *WAFConfig) *WAFMiddleware {
 // ServeHTTP implements http.Handler interface
 func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
+
+	// Add security headers
+	rw.Header().Set("X-Content-Type-Options", "nosniff")
+	rw.Header().Set("X-Frame-Options", "DENY")
+	rw.Header().Set("X-XSS-Protection", "1; mode=block")
+
+	// Add HSTS header if TLS is being used
+	if r.TLS != nil {
+		// HSTS: Force HTTPS for 1 year, include subdomains
+		rw.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+	}
 
 	// Wrap response writer to capture details
 	wrappedRW := &responseWriter{
@@ -105,7 +121,10 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	// Check if should bypass WAF
 	if w.config.DecisionEngine.ShouldBypassWAF(parsed) {
 		w.config.Metrics.RecordRequest("BYPASS", 0)
-		w.proxy.ServeHTTP(wrappedRW, r)
+		w.mu.RLock()
+		proxy := w.proxy
+		w.mu.RUnlock()
+		proxy.ServeHTTP(wrappedRW, r)
 		return
 	}
 
@@ -122,8 +141,45 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	// ========================================================================
 	// STEP 3: Rate Limiting Check
 	// ========================================================================
-	if w.config.RateLimiter.IsRateLimitedWithRoute(parsed.ClientIP, parsed.NormalizedPath) {
+	// Skip rate limiting for static assets (images, CSS, JS, fonts)
+	// This prevents legitimate page loads from being blocked while maintaining
+	// protection for API endpoints and dynamic content
+	isStaticAsset := strings.HasPrefix(parsed.NormalizedPath, "/assets/") ||
+		strings.HasPrefix(parsed.NormalizedPath, "/public/") ||
+		strings.HasSuffix(parsed.NormalizedPath, ".jpg") ||
+		strings.HasSuffix(parsed.NormalizedPath, ".jpeg") ||
+		strings.HasSuffix(parsed.NormalizedPath, ".png") ||
+		strings.HasSuffix(parsed.NormalizedPath, ".gif") ||
+		strings.HasSuffix(parsed.NormalizedPath, ".webp") ||
+		strings.HasSuffix(parsed.NormalizedPath, ".svg") ||
+		strings.HasSuffix(parsed.NormalizedPath, ".css") ||
+		strings.HasSuffix(parsed.NormalizedPath, ".js") ||
+		strings.HasSuffix(parsed.NormalizedPath, ".woff") ||
+		strings.HasSuffix(parsed.NormalizedPath, ".woff2") ||
+		strings.HasSuffix(parsed.NormalizedPath, ".ttf") ||
+		strings.HasSuffix(parsed.NormalizedPath, ".ico")
+
+	if !isStaticAsset && w.config.RateLimiter.IsRateLimitedWithRoute(parsed.ClientIP, parsed.NormalizedPath) {
 		w.config.Metrics.RecordRateLimitHit(parsed.ClientIP)
+
+		// Create audit entry for rate limit
+		entry := &audit.AuditEntry{
+			Timestamp:      parsed.Timestamp,
+			RequestID:      parsed.RequestID,
+			ClientIP:       parsed.ClientIP,
+			Method:         parsed.Method,
+			Path:           parsed.NormalizedPath,
+			UserAgent:      parsed.UserAgent,
+			Protocol:       parsed.Protocol,
+			Host:           parsed.Host,
+			Decision:       "BLOCK",
+			BlockReason:    "Rate limit exceeded",
+			ResponseStatus: 429,
+			RateLimited:    true,
+			Metadata: map[string]interface{}{
+				"reason": "rate_limit_exceeded",
+			},
+		}
 
 		// Log rate limit event
 		w.config.AuditLogger.LogSecurityEvent(
@@ -136,6 +192,9 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 				"user_agent": parsed.UserAgent,
 			},
 		)
+
+		// Add to API buffer for dashboard
+		api.AddToLogBuffer(entry)
 
 		w.blockRequest(wrappedRW, parsed, "RATE_LIMIT", startTime, 429)
 		return
@@ -185,11 +244,28 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	totalLatency := time.Since(startTime)
 	w.config.Metrics.RecordLatency("total", totalLatency)
 
+	// Determine response status based on decision
+	var responseStatus int
+	switch decisionResult.Decision {
+	case "BLOCK":
+		responseStatus = decisionResult.ResponseCode
+		if responseStatus == 0 {
+			responseStatus = 403 // Default for BLOCK
+		}
+	case "CHALLENGE":
+		responseStatus = 429 // Challenge usually uses 429
+	default:
+		responseStatus = wrappedRW.statusCode
+		if responseStatus == 0 {
+			responseStatus = 200 // Default for ALLOW
+		}
+	}
+
 	// ========================================================================
 	// STEP 7: Log Audit Entry
 	// ========================================================================
 	w.logAuditEntry(parsed, evalResult, decisionResult, behaviorResult,
-		wrappedRW.statusCode, totalLatency)
+		responseStatus, totalLatency)
 
 	// ========================================================================
 	// STEP 8: Execute Decision
@@ -198,8 +274,12 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	// Dry run mode - log only, don't block
 	if w.config.DryRun {
 		w.addDebugHeaders(wrappedRW, decisionResult, evalResult)
-		w.proxy.ServeHTTP(wrappedRW, r)
+		w.mu.RLock()
+		proxy := w.proxy
+		w.mu.RUnlock()
+		proxy.ServeHTTP(wrappedRW, r)
 		w.config.Metrics.RecordRequestWithDetails(
+			parsed.ClientIP,
 			parsed.Method,
 			parsed.NormalizedPath,
 			"DRYRUN_"+decisionResult.Decision,
@@ -227,10 +307,14 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		}
 
 		// Forward to upstream
-		w.proxy.ServeHTTP(wrappedRW, r)
+		w.mu.RLock()
+		proxy := w.proxy
+		w.mu.RUnlock()
+		proxy.ServeHTTP(wrappedRW, r)
 
 		// Record successful request
 		w.config.Metrics.RecordRequestWithDetails(
+			parsed.ClientIP,
 			parsed.Method,
 			parsed.NormalizedPath,
 			decisionResult.Decision,
@@ -272,6 +356,7 @@ func (w *WAFMiddleware) blockRequest(
 
 	// Record metrics
 	w.config.Metrics.RecordRequestWithDetails(
+		parsed.ClientIP,
 		parsed.Method,
 		parsed.NormalizedPath,
 		"BLOCK",
@@ -336,64 +421,187 @@ func (w *WAFMiddleware) getBlockPage(requestID, reason string) string {
 		return w.config.CustomBlockPage
 	}
 
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html>
+	return `<!DOCTYPE html>
+<html lang="en">
 <head>
-    <title>Access Denied</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Access Denied - WAF Protection</title>
     <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
         body {
-            font-family: Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
             display: flex;
             justify-content: center;
             align-items: center;
-            height: 100vh;
-            margin: 0;
+            padding: 20px;
+            position: relative;
+            overflow: hidden;
         }
+        
+        body::before {
+            content: '';
+            position: absolute;
+            width: 500px;
+            height: 500px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            top: -250px;
+            right: -250px;
+            animation: float 6s ease-in-out infinite;
+        }
+        
+        body::after {
+            content: '';
+            position: absolute;
+            width: 300px;
+            height: 300px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 50%;
+            bottom: -150px;
+            left: -150px;
+            animation: float 8s ease-in-out infinite reverse;
+        }
+        
+        @keyframes float {
+            0%, 100% { transform: translateY(0px) rotate(0deg); }
+            50% { transform: translateY(-20px) rotate(5deg); }
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.05); opacity: 0.8; }
+        }
+        
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
         .container {
-            background: white;
-            padding: 40px;
-            border-radius: 10px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 60px 50px;
+            border-radius: 24px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 550px;
+            width: 100%;
             text-align: center;
-            max-width: 500px;
+            position: relative;
+            z-index: 1;
+            animation: slideUp 0.6s ease-out;
         }
+        
+        .shield-container {
+            position: relative;
+            width: 120px;
+            height: 120px;
+            margin: 0 auto 35px;
+        }
+        
+        .shield {
+            font-size: 90px;
+            animation: pulse 2s ease-in-out infinite;
+            display: inline-block;
+            filter: drop-shadow(0 4px 8px rgba(231, 76, 60, 0.3));
+        }
+        
         h1 {
+            color: #2c3e50;
+            font-size: 36px;
+            font-weight: 700;
+            margin-bottom: 18px;
+            letter-spacing: -0.5px;
+        }
+        
+        .subtitle {
             color: #e74c3c;
-            margin-bottom: 20px;
+            font-size: 19px;
+            font-weight: 600;
+            margin-bottom: 35px;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
         }
-        .icon {
-            font-size: 80px;
-            margin-bottom: 20px;
-        }
-        .request-id {
-            font-family: monospace;
-            background: #f8f9fa;
-            padding: 10px;
-            border-radius: 5px;
-            margin: 20px 0;
-            font-size: 12px;
-            color: #666;
-        }
-        .reason {
+        
+        .message {
             color: #555;
-            margin: 20px 0;
+            font-size: 17px;
+            line-height: 1.7;
+            margin-bottom: 40px;
+            max-width: 450px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        
+        .footer {
+            color: #999;
+            font-size: 14px;
+            margin-top: 40px;
+            line-height: 1.7;
+            padding-top: 30px;
+            border-top: 1px solid #e9ecef;
+        }
+        
+        .footer strong {
+            color: #666;
+            display: block;
+            margin-bottom: 8px;
+        }
+        
+        @media (max-width: 600px) {
+            .container {
+                padding: 50px 30px;
+            }
+            
+            h1 {
+                font-size: 28px;
+            }
+            
+            .subtitle {
+                font-size: 16px;
+            }
+            
+            .message {
+                font-size: 15px;
+            }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="icon">🛡️</div>
+        <div class="shield-container">
+            <div class="shield">🛡️</div>
+        </div>
+        
         <h1>Access Denied</h1>
-        <p>Your request has been blocked by our Web Application Firewall.</p>
-        <div class="reason">Reason: %s</div>
-        <div class="request-id">Request ID: %s</div>
-        <p style="color: #999; font-size: 14px;">
-            If you believe this is an error, please contact support with the Request ID above.
+
+        <div class="subtitle">Security Protection Active</div>
+        
+        <p class="message">
+            Your request has been blocked by our Web Application Firewall. 
+            This security measure protects our systems from potentially harmful traffic.
         </p>
+        
+        <div class="footer">
+            <strong>Need assistance?</strong>
+            If you believe this is an error, please contact our support team for help.
+        </div>
     </div>
 </body>
-</html>`, reason, requestID)
+</html>`
 }
 
 // getChallengePage returns HTML for challenge page
@@ -481,7 +689,72 @@ func (w *WAFMiddleware) addDebugHeaders(
 	}
 }
 
-// logAuditEntry creates and logs an audit entry
+// ============================================================================
+// Health Check
+// ============================================================================
+
+// HealthCheck returns WAF health status
+func (w *WAFMiddleware) HealthCheck() map[string]interface{} {
+	return map[string]interface{}{
+		"status":      "healthy",
+		"rules_count": w.config.RuleEngine.RuleCount(),
+		"upstream":    w.config.Upstream,
+	}
+}
+
+// NewWAFWithLogBuffer creates WAF middleware with log buffer integration
+func NewWAFWithLogBuffer(config *WAFConfig) *WAFMiddleware {
+	upstreamURL, err := url.Parse(config.Upstream)
+	if err != nil {
+		panic(fmt.Sprintf("Invalid upstream URL: %v", err))
+	}
+
+	waf := &WAFMiddleware{
+		config:     config,
+		proxy:      httputil.NewSingleHostReverseProxy(upstreamURL),
+		backendURL: config.Upstream,
+	}
+
+	waf.proxy.ErrorHandler = waf.proxyErrorHandler
+
+	return waf
+}
+
+// GetBackend returns the current backend URL
+func (w *WAFMiddleware) GetBackend() string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.backendURL
+}
+
+// UpdateBackend updates the backend URL and recreates the reverse proxy
+func (w *WAFMiddleware) UpdateBackend(newURL string) error {
+	// Validate URL
+	upstreamURL, err := url.Parse(newURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL format: %v", err)
+	}
+
+	// Check if scheme is valid
+	if upstreamURL.Scheme != "http" && upstreamURL.Scheme != "https" {
+		return fmt.Errorf("invalid URL scheme: must be http or https")
+	}
+
+	// Create new reverse proxy
+	newProxy := httputil.NewSingleHostReverseProxy(upstreamURL)
+	newProxy.ErrorHandler = w.proxyErrorHandler
+
+	// Update atomically
+	w.mu.Lock()
+	w.proxy = newProxy
+	w.backendURL = newURL
+	w.config.Upstream = newURL // Update config too
+	w.mu.Unlock()
+
+	return nil
+}
+
+// logAuditEntry records audit details and stores them for the API dashboard
 func (w *WAFMiddleware) logAuditEntry(
 	parsed *engine.ParsedRequest,
 	evalResult *engine.EvaluationResult,
@@ -503,6 +776,7 @@ func (w *WAFMiddleware) logAuditEntry(
 			Score:     match.Score,
 			MatchedOn: match.MatchedOn,
 			Pattern:   match.Pattern,
+			Payload:   match.Value,
 		})
 
 		if !categoryMap[match.Category] {
@@ -541,18 +815,9 @@ func (w *WAFMiddleware) logAuditEntry(
 		Metadata:        decisionResult.Metadata,
 	}
 
+	// Log to file
 	w.config.AuditLogger.Log(entry)
-}
 
-// ============================================================================
-// Health Check
-// ============================================================================
-
-// HealthCheck returns WAF health status
-func (w *WAFMiddleware) HealthCheck() map[string]interface{} {
-	return map[string]interface{}{
-		"status":      "healthy",
-		"rules_count": w.config.RuleEngine.RuleCount(),
-		"upstream":    w.config.Upstream,
-	}
+	// Add to API buffer for dashboard
+	api.AddToLogBuffer(entry)
 }

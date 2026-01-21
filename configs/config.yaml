@@ -1,18 +1,19 @@
 server:
   listen: "0.0.0.0:8080"
+  https_listen: "0.0.0.0:8443"
   read_timeout: 30
   write_timeout: 30
   idle_timeout: 120
 
 upstream:
-  url: "http://127.0.0.1:8000" # Your backend service
+  url: "http://127.0.0.1:3000" # Your backend service
 
 parser:
   max_body_size: 10485760 # 10MB
 
 rate_limit:
-  requests_per_min: 100
-  burst_size: 20
+  requests_per_min: 1000
+  burst_size: 100
 
 behavior:
   bruteforce_threshold: 5
@@ -21,6 +22,29 @@ behavior:
 decision:
   block_threshold: 5.0 # Block if score >= 5
   challenge_threshold: 4.0 # Challenge if score >= 4
+  enable_whitelist: true  # Enable IP whitelisting
+  enable_blacklist: true  # Enable IP blacklisting
+
+database:
+  host: "localhost"
+  port: 5432
+  name: "waf_db"
+  user: "waf_user"
+  password: "waf_password"
+  sslmode: "disable"
+  max_connections: 25
+
+auth:
+  jwt_secret: "your-secret-key-change-this-in-production-256-bit-minimum"
+  jwt_expiry: "24h"
+  bcrypt_cost: 10
+  require_auth: false  # Set to true to enable authentication
+
+tls:
+  enabled: true
+  cert_file: "./configs/certs/cert.pem"
+  key_file: "./configs/certs/key.pem"
+  auto_redirect: true  # Redirect HTTP to HTTPS
 
 audit:
-  log_path: "/var/log/waf/audit.log"
+  log_path: "./logs/waf/audit.log" # Use relative path in current dir
