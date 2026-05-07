@@ -507,7 +507,10 @@ func (de *DecisionEngine) AdjustThreshold(blockRate float64) {
 	}
 }
 
-// IsHealthCheckPath checks if path is a health check endpoint
+// IsHealthCheckPath checks if path is a health check / WAF infrastructure
+// endpoint that should bypass rule evaluation. Note: "/api/" is intentionally
+// NOT in this list — that prefix is the main upstream surface for many apps,
+// and bypassing it lets every API attack through.
 func (de *DecisionEngine) IsHealthCheckPath(path string) bool {
 	healthCheckPaths := []string{
 		"/health",
@@ -516,8 +519,10 @@ func (de *DecisionEngine) IsHealthCheckPath(path string) bool {
 		"/ping",
 		"/status",
 		"/metrics",
-		"/api/",      // API endpoints
-		"/dashboard", // Dashboard
+		"/dashboard",  // WAF dashboard UI (static)
+		"/waf-api/",   // WAF management API (auth-protected)
+		"/login.html", // WAF auth pages
+		"/register.html",
 	}
 
 	for _, hcp := range healthCheckPaths {
@@ -528,10 +533,42 @@ func (de *DecisionEngine) IsHealthCheckPath(path string) bool {
 	return false
 }
 
-// ShouldBypassWAF determines if request should bypass WAF entirely
+// IsRealtimePath returns true for paths used by long-poll / websocket
+// transports that legitimate apps poll constantly. Inspecting them with
+// the rule engine produces no security signal but generates large
+// volumes of false positives and skews rate-limit counters.
+func (de *DecisionEngine) IsRealtimePath(path string) bool {
+	realtimePrefixes := []string{
+		"/socket.io/",
+		"/sockjs-node/",
+		"/_ws/",
+		"/ws/",
+	}
+	for _, p := range realtimePrefixes {
+		if strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ShouldBypassWAF determines if request should bypass WAF entirely.
+// Bypassed requests skip rate-limit, rule evaluation, and behavior analysis.
+// Blacklisted IPs are NEVER bypassed — admin-blacklisted addresses must be
+// rejected even when targeting health/dashboard paths.
 func (de *DecisionEngine) ShouldBypassWAF(req *engine.ParsedRequest) bool {
+	if de.config.EnableBlacklist && de.isBlacklisted(req.ClientIP) {
+		return false
+	}
+
 	// Bypass health checks
 	if de.IsHealthCheckPath(req.NormalizedPath) {
+		return true
+	}
+
+	// Bypass realtime/websocket transports (no inspectable payload,
+	// pure noise for the rule engine and rate limiter).
+	if de.IsRealtimePath(req.NormalizedPath) {
 		return true
 	}
 

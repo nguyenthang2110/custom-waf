@@ -414,7 +414,7 @@ func (l *Logger) LogRequest(
 		Categories:     categories,
 		ResponseStatus: responseStatus,
 		Latency:        latency,
-		LatencyMs:      float64(latency.Milliseconds()),
+		LatencyMs:      float64(latency.Microseconds()) / 1000.0,
 		Metadata:       make(map[string]interface{}),
 	}
 

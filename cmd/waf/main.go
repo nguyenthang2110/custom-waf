@@ -24,6 +24,7 @@ import (
 	"waf-project/internal/normalizer"
 	"waf-project/internal/parser"
 	"waf-project/internal/ratelimit"
+	"waf-project/internal/training"
 	"waf-project/pkg/config"
 	"waf-project/web"
 
@@ -101,6 +102,19 @@ func main() {
 	})
 	log.Println("✓ Audit Logger initialized")
 
+	trainingLogger := training.NewLogger(training.Config{
+		Enabled:          cfg.Training.Enabled,
+		LogPath:          cfg.Training.LogPath,
+		MaxTextLen:       cfg.Training.MaxTextLen,
+		BufferSize:       cfg.Training.BufferSize,
+		SkipPathPrefixes: cfg.Training.SkipPathPrefixes,
+	})
+	if trainingLogger.Enabled() {
+		log.Printf("✓ Training Logger initialized → %s", cfg.Training.LogPath)
+	} else {
+		log.Println("✓ Training Logger disabled (set training.enabled: true to capture)")
+	}
+
 	metricsCollector := metrics.NewCollector()
 	log.Println("✓ Metrics Collector initialized")
 
@@ -176,6 +190,7 @@ func main() {
 		BehaviorDetector: behaviorDetector,
 		DecisionEngine:   decisionEngine,
 		AuditLogger:      auditLogger,
+		TrainingLogger:   trainingLogger,
 		Metrics:          metricsCollector,
 		Upstream:         cfg.Upstream.URL,
 	})
@@ -359,6 +374,10 @@ func main() {
 	// Cleanup resources
 	log.Println("Closing audit logger...")
 	auditLogger.Close()
+	if trainingLogger.Enabled() {
+		log.Println("Closing training logger...")
+		_ = trainingLogger.Close()
+	}
 
 	// Print final statistics
 	finalMetrics := ruleEngine.GetMetrics()

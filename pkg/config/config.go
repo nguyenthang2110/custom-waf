@@ -19,6 +19,7 @@ type Config struct {
 	Auth      AuthConfig      `yaml:"auth"`
 	TLS       TLSConfig       `yaml:"tls"`
 	Audit     AuditConfig     `yaml:"audit"`
+	Training  TrainingConfig  `yaml:"training"`
 }
 
 type ServerConfig struct {
@@ -86,6 +87,24 @@ type AuthConfig struct {
 
 type AuditConfig struct {
 	LogPath string `yaml:"log_path"`
+}
+
+// TrainingConfig configures the dedicated ML-training log writer.
+// Each entry mirrors the {"text": ...} payload that buildMLInput
+// would send to the model, so the file is ready to ingest as-is.
+//
+// File rotation: if LogPath is "./logs/waf/training.jsonl", actual files
+// land at "./logs/waf/training-YYYY-MM-DD.jsonl" (one per UTC day).
+type TrainingConfig struct {
+	Enabled    bool   `yaml:"enabled"`      // master switch
+	LogPath    string `yaml:"log_path"`     // base path; date is inserted before ext
+	MaxTextLen int    `yaml:"max_text_len"` // truncate text to this many bytes (default 1000)
+	BufferSize int    `yaml:"buffer_size"`  // async write buffer (default 4096)
+
+	// User-supplied path prefixes that should be skipped on top of the
+	// built-in skip list (static assets, /socket.io/, /health, /waf-api/...).
+	// Example: ["/internal/heartbeat", "/v2/probe"].
+	SkipPathPrefixes []string `yaml:"skip_path_prefixes"`
 }
 
 // Load reads and parses configuration from a YAML file.

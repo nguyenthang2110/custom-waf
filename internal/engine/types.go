@@ -33,9 +33,12 @@ type RuleExceptions struct {
 }
 
 type RuleMetadata struct {
-	Category    string `json:"category"`
-	Severity    string `json:"severity"`
-	Description string `json:"description,omitempty"`
+	Category    string   `json:"category"`
+	Severity    string   `json:"severity"`
+	Description string   `json:"description,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Author      string   `json:"author,omitempty"`
+	Created     string   `json:"created,omitempty"`
 }
 
 type Rule struct {

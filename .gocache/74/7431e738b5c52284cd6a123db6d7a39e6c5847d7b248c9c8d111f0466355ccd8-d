@@ -1,3 +1,0 @@
-./auth_middleware.go
-./redirect.go
-./waf.go

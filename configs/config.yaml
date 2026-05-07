@@ -48,3 +48,21 @@ tls:
 
 audit:
   log_path: "./logs/waf/audit.log" # Use relative path in current dir
+
+# Training log: one JSONL line per inspected request, in the exact "text"
+# shape the ML service consumes. Files rotate daily — actual file names are
+# "<stem>-YYYY-MM-DD<ext>", so log_path below produces e.g.
+# "./logs/waf/training-2026-05-07.jsonl".
+#
+# Built-in skip list already covers static assets, /health, /dashboard,
+# /waf-api/, /socket.io/, /sockjs-node/, /robots.txt, /favicon.ico, /.well-known/.
+# Use skip_path_prefixes to add app-specific paths you know are pure noise
+# (heartbeats, internal probes, etc).
+training:
+  enabled: true
+  log_path: "./logs/waf/training.jsonl"
+  max_text_len: 1000
+  buffer_size: 4096
+  skip_path_prefixes:
+    # - "/internal/heartbeat"
+    # - "/v2/probe"

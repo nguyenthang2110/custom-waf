@@ -1,4 +1,0 @@
-./auth_api.go
-./auth_handlers.go
-./handlers.go
-./logbuffer.go

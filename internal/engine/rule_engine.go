@@ -479,6 +479,58 @@ func (re *RuleEngine) RuleCount() int {
 	return len(re.rules)
 }
 
+// RuleSummary is a lightweight, JSON-friendly view of a loaded rule —
+// safe to expose via the dashboard API (omits compiled regex internals).
+type RuleSummary struct {
+	ID            string   `json:"id"`
+	Version       string   `json:"version,omitempty"`
+	Enabled       bool     `json:"enabled"`
+	Category      string   `json:"category"`
+	Severity      string   `json:"severity"`
+	Description   string   `json:"description,omitempty"`
+	Tags          []string `json:"tags,omitempty"`
+	Targets       []string `json:"targets,omitempty"`
+	Methods       []string `json:"methods,omitempty"`
+	AnomalyScore  int      `json:"anomaly_score"`
+	PatternCount  int      `json:"pattern_count"`
+	HitCount      int64    `json:"hit_count"`
+}
+
+// ListRules returns a snapshot of every loaded rule with hit counters
+// so the dashboard can render a useful rules table.
+func (re *RuleEngine) ListRules() []RuleSummary {
+	re.mu.RLock()
+	rules := make([]*Rule, len(re.rules))
+	copy(rules, re.rules)
+	re.mu.RUnlock()
+
+	re.metrics.mu.RLock()
+	hits := make(map[string]int64, len(re.metrics.RuleHitCount))
+	for k, v := range re.metrics.RuleHitCount {
+		hits[k] = v
+	}
+	re.metrics.mu.RUnlock()
+
+	out := make([]RuleSummary, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, RuleSummary{
+			ID:           r.ID,
+			Version:      r.Version,
+			Enabled:      r.Enabled,
+			Category:     r.Metadata.Category,
+			Severity:     r.Metadata.Severity,
+			Description:  r.Metadata.Description,
+			Tags:         r.Metadata.Tags,
+			Targets:      r.Conditions.Targets,
+			Methods:      r.Conditions.Methods,
+			AnomalyScore: r.Scoring.AnomalyScore,
+			PatternCount: len(r.Patterns),
+			HitCount:     hits[r.ID],
+		})
+	}
+	return out
+}
+
 // GetMetrics returns a copy of metrics
 func (re *RuleEngine) GetMetrics() *RuleMetrics {
 	re.metrics.mu.RLock()

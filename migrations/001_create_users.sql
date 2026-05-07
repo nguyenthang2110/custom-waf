@@ -20,12 +20,14 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 
 -- Insert default admin account
--- Password: admin123 (bcrypt hash with cost 10)
-INSERT INTO users (username, email, password_hash, role) 
+-- Password: admin123 (bcrypt hash with cost 10 — verified against
+-- the same JWTManager / bcrypt.CompareHashAndPassword the app uses).
+-- Change immediately after first login.
+INSERT INTO users (username, email, password_hash, role)
 VALUES (
     'admin',
     'admin@waf.local',
-    '$2a$10$rKZV8qEhJ9mZJxGxQXvOYuYxK5qHJ5fKJ5VZ5xJ5fJ5VZ5xJ5fJ5V',
+    '$2a$10$bd6fEgYpUIsIFosVoEZbT.TTDKPY9D/ALHCtsOfNNMhg8sQPPOCOC',
     'admin'
 ) ON CONFLICT (username) DO NOTHING;
 

@@ -20,6 +20,7 @@ import (
 	"waf-project/internal/normalizer"
 	"waf-project/internal/parser"
 	"waf-project/internal/ratelimit"
+	"waf-project/internal/training"
 )
 
 // WAFConfig holds configuration for WAF middleware
@@ -31,6 +32,7 @@ type WAFConfig struct {
 	BehaviorDetector *behavior.Detector
 	DecisionEngine   *decision.DecisionEngine
 	AuditLogger      *audit.Logger
+	TrainingLogger   *training.Logger // optional — nil disables training capture
 	Metrics          *metrics.Collector
 	Upstream         string
 
@@ -118,7 +120,20 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	}
 	w.config.Metrics.RecordLatency("parser", time.Since(parseStart))
 
-	// Check if should bypass WAF
+	// ========================================================================
+	// STEP 2: Normalize Request
+	// ========================================================================
+	// Must run before ShouldBypassWAF — the bypass check inspects
+	// NormalizedPath, which the parser leaves blank.
+	normStart := time.Now()
+	if err := w.config.Normalizer.Normalize(parsed); err != nil {
+		w.handleError(wrappedRW, r, "Failed to normalize request", http.StatusBadRequest)
+		return
+	}
+	w.config.Metrics.RecordLatency("normalizer", time.Since(normStart))
+
+	// Bypass WAF for health checks, dashboard, and websocket transports.
+	// Done AFTER normalization so NormalizedPath is populated.
 	if w.config.DecisionEngine.ShouldBypassWAF(parsed) {
 		w.config.Metrics.RecordRequest("BYPASS", 0)
 		w.mu.RLock()
@@ -127,16 +142,6 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		proxy.ServeHTTP(wrappedRW, r)
 		return
 	}
-
-	// ========================================================================
-	// STEP 2: Normalize Request
-	// ========================================================================
-	normStart := time.Now()
-	if err := w.config.Normalizer.Normalize(parsed); err != nil {
-		w.handleError(wrappedRW, r, "Failed to normalize request", http.StatusBadRequest)
-		return
-	}
-	w.config.Metrics.RecordLatency("normalizer", time.Since(normStart))
 
 	// ========================================================================
 	// STEP 3: Rate Limiting Check
@@ -808,7 +813,7 @@ func (w *WAFMiddleware) logAuditEntry(
 		BehaviorThreats: behaviorResult.ThreatTypes,
 		ResponseStatus:  responseStatus,
 		Latency:         latency,
-		LatencyMs:       float64(latency.Milliseconds()),
+		LatencyMs:       float64(latency.Microseconds()) / 1000.0,
 		RateLimited:     false,
 		BlockDuration:   decisionResult.BlockDuration,
 		BlockReason:     decisionResult.Reason,
@@ -820,4 +825,16 @@ func (w *WAFMiddleware) logAuditEntry(
 
 	// Add to API buffer for dashboard
 	api.AddToLogBuffer(entry)
+
+	// Mirror to the training file. Skip noisy paths (static assets, infra,
+	// websocket polling, plus user-supplied prefixes) so the dataset stays
+	// focused on the protected app.
+	if w.config.TrainingLogger != nil &&
+		w.config.TrainingLogger.Enabled() &&
+		!w.config.TrainingLogger.ShouldSkip(parsed.NormalizedPath) {
+		w.config.TrainingLogger.Log(parsed, evalResult, decisionResult.Decision, responseStatus, latency)
+	}
 }
+
+// (training package import is used above)
+var _ = training.MaxTextLenDefault

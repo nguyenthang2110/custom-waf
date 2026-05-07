@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -70,45 +71,153 @@ func (s *APIServer) SetWAFMiddleware(waf WAFMiddlewareInterface) {
 
 // RegisterRoutes registers all API routes
 func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
-	// Authentication endpoints (WAF-specific, not proxied)
+	// Public auth endpoints (login + register)
 	mux.HandleFunc("/waf-api/auth/register", s.handleRegister)
 	mux.HandleFunc("/waf-api/auth/login", s.handleLogin)
 	mux.HandleFunc("/waf-api/auth/logout", s.handleLogout)
-	mux.HandleFunc("/waf-api/auth/me", s.handleGetCurrentUser)
-	mux.HandleFunc("/waf-api/auth/users", s.handleListUsers)
 
-	// Stats endpoints
+	// Authenticated user info (any logged-in user)
+	mux.HandleFunc("/waf-api/auth/me", s.requireAuthN(s.handleGetCurrentUser))
+
+	// Admin-only user management
+	mux.HandleFunc("/waf-api/auth/users", s.requireAdmin(s.handleListUsers))
+
+	// Stats endpoints (read-only — keep public for dashboard)
 	mux.HandleFunc("/waf-api/stats", s.handleStats)
 	mux.HandleFunc("/waf-api/stats/overview", s.handleStatsOverview)
 
-	// Logs endpoints
+	// Logs endpoints — read public, clear is admin-only
 	mux.HandleFunc("/waf-api/logs", s.handleLogs)
 	mux.HandleFunc("/waf-api/logs/recent", s.handleRecentLogs)
-	mux.HandleFunc("/waf-api/logs/clear", s.handleClearLogs)
+	mux.HandleFunc("/waf-api/logs/clear", s.requireAdmin(s.handleClearLogs))
 
-	// IP endpoints
+	// IP endpoints — read public, unblock is admin-only
 	mux.HandleFunc("/waf-api/ips", s.handleIPs)
 	mux.HandleFunc("/waf-api/ips/blocked", s.handleBlockedIPs)
 	mux.HandleFunc("/waf-api/ips/suspicious", s.handleSuspiciousIPs)
-	mux.HandleFunc("/waf-api/ips/unblock", s.handleUnblockIP)
+	mux.HandleFunc("/waf-api/ips/unblock", s.requireAdmin(s.handleUnblockIP))
 
-	// Rules endpoints
+	// Rules endpoints — read public, upload is admin-only
 	mux.HandleFunc("/waf-api/rules", s.handleRules)
 	mux.HandleFunc("/waf-api/rules/stats", s.handleRuleStats)
-	mux.HandleFunc("/waf-api/rules/upload", s.handleRuleUpload)
+	mux.HandleFunc("/waf-api/rules/upload", s.requireAdmin(s.handleRuleUpload))
 
 	// Rate limit endpoints
 	mux.HandleFunc("/waf-api/ratelimit", s.handleRateLimit)
 
-	// Whitelist/Blacklist management
-	mux.HandleFunc("/waf-api/whitelist", s.handleWhitelist)
-	mux.HandleFunc("/waf-api/blacklist", s.handleBlacklist)
+	// Whitelist/Blacklist — read public, mutate is admin-only
+	mux.HandleFunc("/waf-api/whitelist", s.requireAdminForWrite(s.handleWhitelist))
+	mux.HandleFunc("/waf-api/blacklist", s.requireAdminForWrite(s.handleBlacklist))
 
-	// Backend configuration
-	mux.HandleFunc("/waf-api/backend", s.handleBackend)
+	// Backend configuration — write is admin-only
+	mux.HandleFunc("/waf-api/backend", s.requireAdminForWrite(s.handleBackend))
 
-	// WAF configuration
-	mux.HandleFunc("/waf-api/config", s.handleConfig)
+	// WAF configuration — write is admin-only
+	mux.HandleFunc("/waf-api/config", s.requireAdminForWrite(s.handleConfig))
+}
+
+// authContext holds the authenticated user identity extracted from a JWT.
+type authContext struct {
+	UserID   int
+	Username string
+	Role     string
+}
+
+// authenticate parses the Authorization header and returns the user, or nil
+// if the request is unauthenticated. err is non-nil only when a token was
+// provided but invalid (so the caller can short-circuit with 401).
+func (s *APIServer) authenticate(r *http.Request) (*authContext, error) {
+	if s.jwtManager == nil {
+		return nil, nil
+	}
+	header := r.Header.Get("Authorization")
+	if header == "" {
+		return nil, nil
+	}
+	parts := strings.SplitN(header, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return nil, fmt.Errorf("invalid authorization header format")
+	}
+	claims, err := s.jwtManager.ValidateToken(parts[1])
+	if err != nil {
+		return nil, err
+	}
+	return &authContext{
+		UserID:   claims.UserID,
+		Username: claims.Username,
+		Role:     claims.Role,
+	}, nil
+}
+
+// requireAuthN ensures the request carries a valid JWT (any role).
+// When auth is globally disabled in config, the handler is invoked unchanged.
+func (s *APIServer) requireAuthN(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireAuth || s.jwtManager == nil {
+			next(w, r)
+			return
+		}
+		user, err := s.authenticate(r)
+		if err != nil {
+			writeErrorJSON(w, "Invalid or expired token", http.StatusUnauthorized)
+			return
+		}
+		if user == nil {
+			writeErrorJSON(w, "Authentication required", http.StatusUnauthorized)
+			return
+		}
+		next(w, r.WithContext(withAuth(r, user)))
+	}
+}
+
+// requireAdmin ensures the request carries a valid JWT with role=admin.
+// When auth is globally disabled, the handler is invoked unchanged.
+func (s *APIServer) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireAuth || s.jwtManager == nil {
+			next(w, r)
+			return
+		}
+		user, err := s.authenticate(r)
+		if err != nil {
+			writeErrorJSON(w, "Invalid or expired token", http.StatusUnauthorized)
+			return
+		}
+		if user == nil {
+			writeErrorJSON(w, "Authentication required", http.StatusUnauthorized)
+			return
+		}
+		if user.Role != "admin" {
+			writeErrorJSON(w, "Admin role required", http.StatusForbidden)
+			return
+		}
+		next(w, r.WithContext(withAuth(r, user)))
+	}
+}
+
+// requireAdminForWrite enforces admin auth only on mutating verbs (POST/PUT/PATCH/DELETE),
+// leaving GET/HEAD/OPTIONS open for the dashboard.
+func (s *APIServer) requireAdminForWrite(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next(w, r)
+			return
+		}
+		s.requireAdmin(next)(w, r)
+	}
+}
+
+type ctxKeyAuth struct{}
+
+func withAuth(r *http.Request, user *authContext) context.Context {
+	return context.WithValue(r.Context(), ctxKeyAuth{}, user)
+}
+
+// userFromContext returns the authenticated user attached by requireAuthN/requireAdmin.
+func userFromContext(r *http.Request) (*authContext, bool) {
+	user, ok := r.Context().Value(ctxKeyAuth{}).(*authContext)
+	return user, ok
 }
 
 // ============================================================================
@@ -566,13 +675,37 @@ func (s *APIServer) handleUnblockIP(w http.ResponseWriter, r *http.Request) {
 // ============================================================================
 
 func (s *APIServer) handleRules(w http.ResponseWriter, r *http.Request) {
-	// Return basic rule info
-	response := map[string]interface{}{
-		"total_rules": s.ruleEngine.RuleCount(),
-		"status":      "loaded",
+	rules := s.ruleEngine.ListRules()
+
+	// Optional filters: ?category=, ?severity=, ?enabled=true|false
+	q := r.URL.Query()
+	cat := q.Get("category")
+	sev := strings.ToUpper(q.Get("severity"))
+	enabledFilter := q.Get("enabled")
+
+	filtered := make([]engine.RuleSummary, 0, len(rules))
+	for _, ru := range rules {
+		if cat != "" && !strings.EqualFold(ru.Category, cat) {
+			continue
+		}
+		if sev != "" && ru.Severity != sev {
+			continue
+		}
+		if enabledFilter != "" {
+			want := enabledFilter == "true" || enabledFilter == "1"
+			if ru.Enabled != want {
+				continue
+			}
+		}
+		filtered = append(filtered, ru)
 	}
 
-	writeJSON(w, response)
+	writeJSON(w, map[string]interface{}{
+		"status":      "loaded",
+		"total_rules": len(rules),
+		"returned":    len(filtered),
+		"rules":       filtered,
+	})
 }
 
 func (s *APIServer) handleRuleStats(w http.ResponseWriter, r *http.Request) {
@@ -729,34 +862,20 @@ func (s *APIServer) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 // Whitelist/Blacklist Handlers
 // ============================================================================
 
+// ipMutationRequest is the body for POST/DELETE on whitelist/blacklist.
+// action defaults to "add" for POST and "remove" for DELETE so older clients
+// that send {"action":"remove"} on POST still work.
+type ipMutationRequest struct {
+	IP     string `json:"ip"`
+	Action string `json:"action,omitempty"`
+}
+
 func (s *APIServer) handleWhitelist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		ips := s.decisionEngine.GetWhitelistIPs()
-		writeJSON(w, map[string]interface{}{"ips": ips})
-
-	case http.MethodPost:
-		var req struct {
-			IP string `json:"ip"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
-		s.decisionEngine.AddWhitelistIP(req.IP)
-		writeJSON(w, map[string]string{"status": "added"})
-
-	case http.MethodDelete:
-		var req struct {
-			IP string `json:"ip"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
-		s.decisionEngine.RemoveWhitelistIP(req.IP)
-		writeJSON(w, map[string]string{"status": "removed"})
-
+		writeJSON(w, map[string]interface{}{"ips": s.decisionEngine.GetWhitelistIPs()})
+	case http.MethodPost, http.MethodDelete:
+		s.mutateIPList(w, r, s.decisionEngine.AddWhitelistIP, s.decisionEngine.RemoveWhitelistIP)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -765,33 +884,48 @@ func (s *APIServer) handleWhitelist(w http.ResponseWriter, r *http.Request) {
 func (s *APIServer) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		ips := s.decisionEngine.GetBlacklistIPs()
-		writeJSON(w, map[string]interface{}{"ips": ips})
-
-	case http.MethodPost:
-		var req struct {
-			IP string `json:"ip"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
-		s.decisionEngine.AddBlacklistIP(req.IP)
-		writeJSON(w, map[string]string{"status": "added"})
-
-	case http.MethodDelete:
-		var req struct {
-			IP string `json:"ip"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
-		s.decisionEngine.RemoveBlacklistIP(req.IP)
-		writeJSON(w, map[string]string{"status": "removed"})
-
+		writeJSON(w, map[string]interface{}{"ips": s.decisionEngine.GetBlacklistIPs()})
+	case http.MethodPost, http.MethodDelete:
+		s.mutateIPList(w, r, s.decisionEngine.AddBlacklistIP, s.decisionEngine.RemoveBlacklistIP)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *APIServer) mutateIPList(
+	w http.ResponseWriter,
+	r *http.Request,
+	add func(string),
+	remove func(string),
+) {
+	var req ipMutationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.IP == "" {
+		http.Error(w, "ip required", http.StatusBadRequest)
+		return
+	}
+
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action == "" {
+		if r.Method == http.MethodDelete {
+			action = "remove"
+		} else {
+			action = "add"
+		}
+	}
+
+	switch action {
+	case "add":
+		add(req.IP)
+		writeJSON(w, map[string]string{"status": "added", "ip": req.IP})
+	case "remove", "delete":
+		remove(req.IP)
+		writeJSON(w, map[string]string{"status": "removed", "ip": req.IP})
+	default:
+		http.Error(w, "action must be add or remove", http.StatusBadRequest)
 	}
 }
 

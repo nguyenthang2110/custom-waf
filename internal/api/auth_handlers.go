@@ -173,15 +173,20 @@ func (s *APIServer) handleGetCurrentUser(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Get user ID from context (set by auth middleware)
-	userID, ok := r.Context().Value("user_id").(int)
+	// requireAuthN attaches the JWT claims via withAuth(); fall back to
+	// a fresh authenticate() call if auth is globally disabled but a
+	// token was provided anyway.
+	auth, ok := userFromContext(r)
 	if !ok {
-		writeErrorJSON(w, "User not found in context", http.StatusUnauthorized)
-		return
+		ctxAuth, _ := s.authenticate(r)
+		if ctxAuth == nil {
+			writeErrorJSON(w, "User not found in context", http.StatusUnauthorized)
+			return
+		}
+		auth = ctxAuth
 	}
 
-	// Get user from database
-	user, err := s.userRepo.GetByID(userID)
+	user, err := s.userRepo.GetByID(auth.UserID)
 	if err != nil {
 		writeErrorJSON(w, "User not found", http.StatusNotFound)
 		return

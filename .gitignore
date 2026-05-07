@@ -1,0 +1,32 @@
+# Build artifacts
+/bin/
+/waf
+*.exe
+
+# Go build cache (when GOCACHE=$PWD/.gocache for offline builds)
+/.gocache/
+/.gomodcache/
+
+# Runtime output
+/logs/
+/test_results/
+/tmp/
+*.log
+
+# Local backups created by /waf-api/rules/upload
+/configs/rules/backups/all_rules_*.json
+
+# IDE / OS noise
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/settings.json
+*.swp
+
+# Claude session metadata (worktrees, plans, etc.)
+.claude/
+
+# Local secrets
+*.local.yaml
+.env
+.env.*

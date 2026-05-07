@@ -79,7 +79,7 @@
     "enabled": true,
     "metadata": {
       "category": "SQL Injection",
-      "severity": "HIGH",
+      "severity": "CRITICAL",
       "tags": [
         "sqli",
         "boolean-based",
@@ -101,19 +101,23 @@
     },
     "transforms": [
       "URL_DECODE",
-      "LOWERCASE",
-      "REMOVE_WHITESPACE"
+      "LOWERCASE"
     ],
     "patterns": [
       {
         "type": "REGEX",
-        "pattern": "(and|or)\\d*=\\d*|(and|or)(true|false)",
+        "pattern": "(?:^|[^a-z])(or|and)[\\W_]*['\\\"]?\\d+['\\\"]?\\s*=\\s*['\\\"]?\\d+",
+        "flags": "i"
+      },
+      {
+        "type": "REGEX",
+        "pattern": "(?:^|[^a-z])(or|and)[\\W_]*(true|false)\\b",
         "flags": "i"
       }
     ],
     "scoring": {
-      "anomaly_score": 4,
-      "severity_multiplier": 1.2
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
     },
     "actions": [
       {
@@ -799,10 +803,12 @@
     "conditions": {
       "phase": "REQUEST",
       "targets": [
-        "QUERY",
-        "BODY"
+        "BODY",
+        "PATH",
+        "QUERY"
       ],
       "methods": [
+        "GET",
         "POST",
         "PUT"
       ]
@@ -814,7 +820,7 @@
     "patterns": [
       {
         "type": "REGEX",
-        "pattern": "(eval|exec|system|passthru|shell_exec|assert)\\s*\\(",
+        "pattern": "(eval|exec|system|passthru|shell_exec|popen|proc_open|assert|preg_replace)\\s*\\(",
         "flags": "i"
       },
       {
@@ -1912,7 +1918,10 @@
     "conditions": {
       "phase": "REQUEST",
       "targets": [
-        "HEADERS"
+        "BODY",
+        "COOKIES",
+        "HEADERS",
+        "QUERY"
       ],
       "methods": [
         "GET",
@@ -1928,7 +1937,7 @@
     "patterns": [
       {
         "type": "REGEX",
-        "pattern": "\\(\\) \\{ :;\\};",
+        "pattern": "\\(\\s*\\)\\s*\\{\\s*:\\s*;?\\s*\\}\\s*;",
         "flags": "i"
       }
     ],
@@ -1958,7 +1967,7 @@
     "enabled": true,
     "metadata": {
       "category": "SQL Injection",
-      "severity": "HIGH",
+      "severity": "CRITICAL",
       "tags": [
         "sqli",
         "order-by",
@@ -1990,8 +1999,8 @@
       }
     ],
     "scoring": {
-      "anomaly_score": 4,
-      "severity_multiplier": 1.2
+      "anomaly_score": 5,
+      "severity_multiplier": 1.5
     },
     "actions": [
       {
@@ -2086,8 +2095,11 @@
     "conditions": {
       "phase": "REQUEST",
       "targets": [
-        "QUERY",
-        "BODY"
+        "BODY",
+        "COOKIES",
+        "HEADERS",
+        "PATH",
+        "QUERY"
       ],
       "methods": [
         "GET",
@@ -2102,7 +2114,7 @@
     "patterns": [
       {
         "type": "REGEX",
-        "pattern": "bash\\s+-i|/dev/tcp/|nc\\s+-e|/bin/sh|/bin/bash|socat\\s+exec",
+        "pattern": "bash\\s+-i|/dev/tcp/|/dev/udp/|nc\\s+-[ev]|ncat\\s+-[ev]|socat\\s+exec|python\\s+-c\\s+['\\\"]?import\\s+(socket|os)|perl\\s+-e\\s+['\\\"]?use\\s+socket",
         "flags": "i"
       }
     ],
