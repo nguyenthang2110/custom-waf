@@ -1,286 +1,378 @@
+// internal/engine/rule_engine.go
+//
+// V2 rule engine — evaluates parsed HTTP requests against the ruleset.
+//
+// Evaluation pipeline per rule:
+//   1. when         — pre-filter (methods, paths, score gate, labels)
+//   2. except       — whitelist (IPs, paths, UAs, labels)
+//   3. inspect      — extract input values from request
+//   4. transforms   — chain (per rule)
+//   5. detect       — boolean tree (any/all) of pattern leaves
+//   6. action       — score, labels, log, block, ML confirm, track
+//
+// Public API surface is preserved from v1 so existing callers
+// (middleware/audit/decision) keep working without changes.
 package engine
 
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
 
-// RuleEngine evaluates rules against requests
-type RuleEngine struct {
-	rules          []*Rule
-	ruleCache      map[string]*Rule
-	transformFuncs map[string]TransformFunc
-	matcherFuncs   map[string]MatcherFunc
+// =========================================================================
+// RuleEngine
+// =========================================================================
 
-	// Configuration
+type RuleEngine struct {
+	mu        sync.RWMutex
+	rules     []*Rule
+	ruleCache map[string]*Rule
+
+	// Thresholds for backwards-compat string Decision (BLOCK/CHALLENGE/LOG/ALLOW).
+	// Real block decision is made by internal/decision; engine only computes a hint.
 	blockThreshold     float64
 	challengeThreshold float64
 	logThreshold       float64
 
-	// Performance
+	transformFuncs map[string]TransformFunc
+
+	mlPred  MLPredictor
+	tracker *Tracker
+
 	metrics *RuleMetrics
-	mu      sync.RWMutex
 }
 
-// NewRuleEngine creates a new rule engine
+// NewRuleEngine — preserves v1 constructor signature.
 func NewRuleEngine() *RuleEngine {
-	engine := &RuleEngine{
+	return &RuleEngine{
 		rules:              make([]*Rule, 0),
 		ruleCache:          make(map[string]*Rule),
-		transformFuncs:     make(map[string]TransformFunc),
-		matcherFuncs:       make(map[string]MatcherFunc),
 		blockThreshold:     10.0,
 		challengeThreshold: 5.0,
 		logThreshold:       3.0,
+		transformFuncs:     builtinTransforms,
+		tracker:            NewTracker(),
 		metrics: &RuleMetrics{
 			RuleHitCount:  make(map[string]int64),
 			CategoryStats: make(map[string]int64),
 		},
 	}
-
-	// Register built-in transforms
-	engine.registerTransforms()
-
-	// Register built-in matchers
-	engine.registerMatchers()
-
-	return engine
 }
 
-// LoadRulesFromFile loads rules from JSON file
+// SetMLPredictor — wire ML adapter (call from main before serving).
+func (re *RuleEngine) SetMLPredictor(p MLPredictor) {
+	re.mu.Lock()
+	re.mlPred = p
+	re.mu.Unlock()
+}
+
+// SetThresholds — for decision hint computation.
+func (re *RuleEngine) SetThresholds(block, challenge, logT float64) {
+	re.mu.Lock()
+	re.blockThreshold = block
+	re.challengeThreshold = challenge
+	re.logThreshold = logT
+	re.mu.Unlock()
+}
+
+// Tracker exposes the internal counter store (read-only intent).
+func (re *RuleEngine) Tracker() *Tracker { return re.tracker }
+
+// =========================================================================
+// Loading (preserves v1 API surface)
+// =========================================================================
+
 func (re *RuleEngine) LoadRulesFromFile(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("failed to read rules file: %w", err)
 	}
-
 	return re.LoadRulesFromJSON(data)
 }
 
-// LoadRulesFromJSON loads rules from JSON data
 func (re *RuleEngine) LoadRulesFromJSON(data []byte) error {
-	var rules []Rule
-	if err := json.Unmarshal(data, &rules); err != nil {
+	rules, err := ParseRules(data)
+	if err != nil {
 		return fmt.Errorf("failed to parse rules: %w", err)
 	}
-
-	for i := range rules {
-		if err := re.addRule(&rules[i]); err != nil {
-			return fmt.Errorf("failed to add rule %s: %w", rules[i].ID, err)
+	for _, r := range rules {
+		if err := re.addRule(r); err != nil {
+			return fmt.Errorf("rule %s: %w", r.ID, err)
 		}
 	}
-
 	return nil
 }
 
-// ValidateRulesJSON validates rules JSON without loading them
-// Returns the count of valid rules and any errors
+// ValidateRulesJSON returns (validCount, error). Error == nil means all
+// rules in the file are valid.
 func (re *RuleEngine) ValidateRulesJSON(data []byte) (int, error) {
-	var rules []Rule
-	if err := json.Unmarshal(data, &rules); err != nil {
+	rules, err := ParseRules(data)
+	if err != nil {
 		return 0, fmt.Errorf("invalid JSON format: %w", err)
 	}
-
 	if len(rules) == 0 {
 		return 0, fmt.Errorf("no rules found in file")
 	}
-
-	// Validate each rule
-	validCount := 0
-	var validationErrors []string
-
-	for i := range rules {
-		if err := re.validateRule(&rules[i]); err != nil {
-			validationErrors = append(validationErrors,
-				fmt.Sprintf("rule %s: %v", rules[i].ID, err))
-		} else {
-			validCount++
+	seen := make(map[string]bool)
+	var errs []string
+	count := 0
+	for i, r := range rules {
+		if err := validateRule(r, seen); err != nil {
+			errs = append(errs, fmt.Sprintf("rule #%d (%s): %v", i, r.ID, err))
+			continue
 		}
+		count++
 	}
-
-	if len(validationErrors) > 0 {
-		return validCount, fmt.Errorf("validation errors: %s",
-			strings.Join(validationErrors, "; "))
+	if len(errs) > 0 {
+		return count, fmt.Errorf("validation errors: %s", strings.Join(errs, "; "))
 	}
-
-	return validCount, nil
+	return count, nil
 }
 
-// ReloadRules atomically replaces all current rules with new ones
-// This allows hot-reload without restarting the WAF
+// ReloadRules atomically replaces all rules. Hot-reload path.
 func (re *RuleEngine) ReloadRules(data []byte) error {
-	// First validate the new rules
-	_, err := re.ValidateRulesJSON(data)
-	if err != nil {
+	if _, err := re.ValidateRulesJSON(data); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
-
-	// Parse rules again (already validated)
-	var newRules []Rule
-	if err := json.Unmarshal(data, &newRules); err != nil {
-		return fmt.Errorf("failed to parse rules: %w", err)
+	rules, err := ParseRules(data)
+	if err != nil {
+		return err
 	}
-
-	// Prepare new rules (compile patterns)
-	preparedRules := make([]*Rule, 0, len(newRules))
-	for i := range newRules {
-		newRules[i].compilePatterns()
-		preparedRules = append(preparedRules, &newRules[i])
+	prepared := make([]*Rule, 0, len(rules))
+	cache := make(map[string]*Rule)
+	for _, r := range rules {
+		compileRule(r)
+		prepared = append(prepared, r)
+		cache[r.ID] = r
 	}
-
-	// Create new cache
-	newCache := make(map[string]*Rule)
-	for _, rule := range preparedRules {
-		newCache[rule.ID] = rule
-	}
-
-	// Atomically replace rules (lock for write)
 	re.mu.Lock()
-	re.rules = preparedRules
-	re.ruleCache = newCache
+	re.rules = prepared
+	re.ruleCache = cache
 	re.mu.Unlock()
-
-	// Reset metrics for rule hit counts (keep total stats)
+	// Reset per-rule counters
 	re.metrics.mu.Lock()
 	re.metrics.RuleHitCount = make(map[string]int64)
 	re.metrics.CategoryStats = make(map[string]int64)
 	re.metrics.mu.Unlock()
-
 	return nil
 }
 
-// addRule adds a single rule to the engine
-func (re *RuleEngine) addRule(rule *Rule) error {
-	// Validate rule
-	if err := re.validateRule(rule); err != nil {
+func (re *RuleEngine) addRule(r *Rule) error {
+	seen := make(map[string]bool)
+	re.mu.RLock()
+	for id := range re.ruleCache {
+		seen[id] = true
+	}
+	re.mu.RUnlock()
+	if err := validateRule(r, seen); err != nil {
 		return err
 	}
-
-	// Compile patterns
-	rule.compilePatterns()
-
-	// Add to engine
+	compileRule(r)
 	re.mu.Lock()
-	defer re.mu.Unlock()
-
-	re.rules = append(re.rules, rule)
-	re.ruleCache[rule.ID] = rule
-
+	re.rules = append(re.rules, r)
+	re.ruleCache[r.ID] = r
+	re.mu.Unlock()
 	return nil
 }
 
-// validateRule validates a rule
-func (re *RuleEngine) validateRule(rule *Rule) error {
-	if rule.ID == "" {
-		return fmt.Errorf("rule ID is required")
+// =========================================================================
+// Validation
+// =========================================================================
+
+var (
+	validCategories = map[string]bool{
+		"sqli": true, "xss": true, "lfi": true, "rce": true, "ssrf": true,
+		"xxe": true, "nosqli": true, "scanner": true, "bot": true, "ato": true,
+		"dos": true, "info_leak": true, "schema": true, "custom": true,
 	}
-
-	if rule.Metadata.Category == "" {
-		return fmt.Errorf("rule category is required")
+	validSeverities = map[string]bool{
+		"critical": true, "high": true, "medium": true, "low": true, "info": true,
 	}
+	validTrackScopes = map[string]bool{"ip": true, "session": true, "global": true}
+)
 
-	if len(rule.Patterns) == 0 {
-		return fmt.Errorf("rule must have at least one pattern")
+func validateRule(r *Rule, seen map[string]bool) error {
+	if r.ID == "" {
+		return fmt.Errorf("id is required")
 	}
-
-	// Validate severity
-	validSeverities := map[string]bool{"CRITICAL": true, "HIGH": true, "MEDIUM": true, "LOW": true}
-	if !validSeverities[rule.Metadata.Severity] {
-		return fmt.Errorf("invalid severity: %s", rule.Metadata.Severity)
+	if seen[r.ID] {
+		return fmt.Errorf("duplicate id %q", r.ID)
 	}
+	seen[r.ID] = true
 
-	return nil
-}
-
-// compilePatterns compiles regex patterns in a rule
-func (r *Rule) compilePatterns() {
-	r.compiledOnce.Do(func() {
-		r.compiledPatterns = make([]*regexp.Regexp, len(r.Patterns))
-
-		for i, pattern := range r.Patterns {
-			if pattern.Type == "REGEX" {
-				flags := pattern.Flags
-				regexPattern := pattern.Pattern
-
-				// Apply flags
-				if strings.Contains(flags, "i") {
-					regexPattern = "(?i)" + regexPattern
-				}
-
-				compiled, err := regexp.Compile(regexPattern)
-				if err != nil {
-					// Log error but don't fail
-					continue
-				}
-				r.compiledPatterns[i] = compiled
-			}
+	if r.Info.Category == "" {
+		return fmt.Errorf("info.category is required")
+	}
+	if !validCategories[r.Info.Category] {
+		return fmt.Errorf("info.category %q invalid", r.Info.Category)
+	}
+	if r.Info.Severity == "" {
+		r.Info.Severity = "medium"
+	}
+	if !validSeverities[r.Info.Severity] {
+		return fmt.Errorf("info.severity %q invalid", r.Info.Severity)
+	}
+	if len(r.Inspect) == 0 {
+		return fmt.Errorf("inspect requires at least one selector")
+	}
+	if len(r.Detect.Patterns) == 0 {
+		return fmt.Errorf("detect.patterns requires at least one pattern")
+	}
+	if r.Detect.Logic == "" {
+		r.Detect.Logic = "any"
+	}
+	if r.Detect.Logic != "any" && r.Detect.Logic != "all" {
+		return fmt.Errorf("detect.logic %q must be any or all", r.Detect.Logic)
+	}
+	if r.Action.Track != nil && r.Action.Track.Enabled {
+		if !validTrackScopes[r.Action.Track.Scope] {
+			return fmt.Errorf("action.track.scope %q invalid", r.Action.Track.Scope)
 		}
-	})
+		if r.Action.Track.Threshold <= 0 {
+			r.Action.Track.Threshold = 5
+		}
+		if r.Action.Track.TTLMinutes <= 0 {
+			r.Action.Track.TTLMinutes = 10
+		}
+		if r.Action.Track.Counter == "" {
+			r.Action.Track.Counter = r.ID
+		}
+	}
+	if r.Action.MLConfirm != nil && r.Action.MLConfirm.Enabled {
+		if r.Action.MLConfirm.MinConfidence < 0 || r.Action.MLConfirm.MinConfidence > 1 {
+			return fmt.Errorf("action.ml_confirm.min_confidence must be 0..1")
+		}
+		if r.Action.MLConfirm.Input == "" {
+			r.Action.MLConfirm.Input = "body"
+		}
+	}
+	return nil
 }
 
-// Evaluate evaluates all rules against a request
+// =========================================================================
+// Evaluation
+// =========================================================================
+
+// Evaluate runs all enabled rules against the request and returns the
+// aggregated result.
 func (re *RuleEngine) Evaluate(req *ParsedRequest) *EvaluationResult {
-	startTime := time.Now()
+	start := time.Now()
+
+	re.mu.RLock()
+	rules := re.rules
+	mlPred := re.mlPred
+	re.mu.RUnlock()
 
 	result := &EvaluationResult{
 		TotalScore:   0,
 		MatchedRules: make([]MatchResult, 0),
 		Decision:     "ALLOW",
+		BucketScores: make(map[string]float64),
+		Labels:       []string{},
 	}
+	labelSet := make(map[string]struct{})
 
-	re.mu.RLock()
-	rules := re.rules
-	re.mu.RUnlock()
-
-	// Evaluate each rule
 	for _, rule := range rules {
 		if !rule.Enabled {
 			continue
 		}
-
-		// Check exceptions
-		if re.matchesException(rule, req) {
+		// when — pre-filter
+		if !matchesWhen(rule, req, result, labelSet) {
+			continue
+		}
+		// except — skip if any whitelist matches
+		if matchesExcept(rule, req, labelSet) {
 			continue
 		}
 
-		// Check conditions
-		if !re.matchesConditions(rule, req) {
+		// inspect → transform → detect
+		hit, matchedOn, matchedPattern, matchedValue, offset := evaluateDetect(rule, req)
+		if !hit {
 			continue
 		}
 
-		// Evaluate patterns
-		matches := re.evaluatePatterns(rule, req)
+		// Compute contribution
+		score := rule.Action.Score * rule.compiled.sevMul
 
-		if len(matches) > 0 {
-			// Calculate score with severity multiplier
-			score := float64(rule.Scoring.AnomalyScore) * rule.Scoring.SeverityMultiplier
-
-			for _, match := range matches {
-				match.Score = score
-				match.Severity = rule.Metadata.Severity
-				match.Category = rule.Metadata.Category
-				result.MatchedRules = append(result.MatchedRules, match)
+		// ML confirm
+		if rule.Action.MLConfirm != nil && rule.Action.MLConfirm.Enabled {
+			delta, extraLabels := runMLConfirm(mlPred, rule.Action.MLConfirm, req)
+			score += delta
+			for _, l := range extraLabels {
+				if _, ok := labelSet[l]; !ok {
+					labelSet[l] = struct{}{}
+					result.Labels = append(result.Labels, l)
+				}
 			}
-
-			result.TotalScore += score
-
-			// Update metrics
-			re.updateMetrics(rule.ID, rule.Metadata.Category)
 		}
+
+		// Track
+		var trackHit bool
+		if rule.Action.Track != nil && rule.Action.Track.Enabled {
+			t := rule.Action.Track
+			id := resolveIdentity(t.Scope, req)
+			key := trackKey(t.Scope, t.Counter, id)
+			n := re.tracker.Incr(key, time.Duration(t.TTLMinutes)*time.Minute)
+			if n >= t.Threshold {
+				trackHit = true
+				score += t.OnThresholdScore
+				for _, l := range t.OnThresholdLabels {
+					if _, ok := labelSet[l]; !ok {
+						labelSet[l] = struct{}{}
+						result.Labels = append(result.Labels, l)
+					}
+				}
+			}
+		}
+
+		// Update labels from action.labels
+		for _, l := range rule.Action.Labels {
+			if _, ok := labelSet[l]; !ok {
+				labelSet[l] = struct{}{}
+				result.Labels = append(result.Labels, l)
+			}
+		}
+
+		// Aggregate
+		mr := MatchResult{
+			Matched:   true,
+			RuleID:    rule.ID,
+			RuleName:  rule.Info.Description,
+			MatchedOn: matchedOn,
+			Pattern:   matchedPattern,
+			Value:     truncate(matchedValue, 4096),
+			Offset:    offset,
+			Timestamp: time.Now(),
+			Score:     score,
+			Severity:  rule.Info.Severity,
+			Category:  rule.Info.Category,
+			Labels:    rule.Action.Labels,
+		}
+		result.MatchedRules = append(result.MatchedRules, mr)
+		result.TotalScore += score
+		result.BucketScores[rule.Info.Category] += score
+
+		// Force block from rule action
+		if rule.Action.Block || trackHit && rule.Action.Track != nil && rule.Action.Track.OnThresholdScore >= re.blockThreshold {
+			result.Decision = "BLOCK"
+		}
+
+		re.updateMetrics(rule.ID, rule.Info.Category)
 	}
 
-	// Determine decision based on threshold
-	result.Decision = re.determineDecision(result.TotalScore)
+	// Decision hint (final decision is up to internal/decision)
+	if result.Decision != "BLOCK" {
+		result.Decision = re.determineDecision(result.TotalScore)
+	}
 	result.DecisionReason = fmt.Sprintf("Score: %.2f, Threshold: %.2f",
 		result.TotalScore, re.blockThreshold)
-	result.EvalTime = time.Since(startTime)
+	result.EvalTime = time.Since(start)
 
-	// Update metrics
 	re.metrics.mu.Lock()
 	re.metrics.TotalEvaluations++
 	if len(result.MatchedRules) > 0 {
@@ -294,163 +386,180 @@ func (re *RuleEngine) Evaluate(req *ParsedRequest) *EvaluationResult {
 	return result
 }
 
-// evaluatePatterns evaluates patterns in a rule
-func (re *RuleEngine) evaluatePatterns(rule *Rule, req *ParsedRequest) []MatchResult {
-	matches := make([]MatchResult, 0)
+// =========================================================================
+// Filtering
+// =========================================================================
 
-	// Get target values based on rule conditions
-	targets := re.getTargetValues(rule, req)
-
-	for targetName, targetValue := range targets {
-		// Apply transforms
-		transformed := re.applyTransforms(targetValue, rule.Transforms)
-
-		// Check each pattern
-		for i, pattern := range rule.Patterns {
-			var matched bool
-			var offset int
-
-			switch pattern.Type {
-			case "REGEX":
-				if rule.compiledPatterns[i] != nil {
-					loc := rule.compiledPatterns[i].FindStringIndex(transformed)
-					matched = loc != nil
-					if matched {
-						offset = loc[0]
-					}
-				}
-			case "TOKEN":
-				matched, offset = re.matcherFuncs["TOKEN"](&pattern, transformed)
-			case "WORDLIST":
-				matched, offset = re.matcherFuncs["WORDLIST"](&pattern, transformed)
-			case "ENTROPY":
-				matched, offset = re.matcherFuncs["ENTROPY"](&pattern, transformed)
-			}
-
-			if matched {
-				matches = append(matches, MatchResult{
-					Matched:   true,
-					RuleID:    rule.ID,
-					RuleName:  rule.Metadata.Description,
-					MatchedOn: targetName,
-					Pattern:   pattern.Pattern,
-					Value:     targetValue,
-					Offset:    offset,
-					Timestamp: time.Now(),
-				})
-			}
-		}
-	}
-
-	return matches
-}
-
-// getTargetValues extracts target values from request
-func (re *RuleEngine) getTargetValues(rule *Rule, req *ParsedRequest) map[string]string {
-	targets := make(map[string]string)
-
-	for _, target := range rule.Conditions.Targets {
-		switch target {
-		case "PATH":
-			targets["path"] = req.NormalizedPath
-		case "QUERY":
-			targets["query"] = req.NormalizedQuery
-		case "BODY":
-			targets["body"] = req.NormalizedBody
-		case "HEADERS":
-			var headerStr strings.Builder
-			for key, values := range req.RawHeaders {
-				for _, value := range values {
-					headerStr.WriteString(key + ": " + value + "\n")
-				}
-			}
-			targets["headers"] = headerStr.String()
-		case "COOKIES":
-			var cookieStr strings.Builder
-			for key, value := range req.Cookies {
-				cookieStr.WriteString(key + "=" + value + "; ")
-			}
-			targets["cookies"] = cookieStr.String()
-		}
-	}
-
-	return targets
-}
-
-// applyTransforms applies transform functions
-func (re *RuleEngine) applyTransforms(value string, transforms []string) string {
-	result := value
-
-	for _, transform := range transforms {
-		if fn, exists := re.transformFuncs[transform]; exists {
-			result = fn(result)
-		}
-	}
-
-	return result
-}
-
-// matchesConditions checks if request matches rule conditions
-func (re *RuleEngine) matchesConditions(rule *Rule, req *ParsedRequest) bool {
-	// Check method
-	if len(rule.Conditions.Methods) > 0 {
-		methodMatch := false
-		for _, method := range rule.Conditions.Methods {
-			if method == req.Method {
-				methodMatch = true
-				break
-			}
-		}
-		if !methodMatch {
+func matchesWhen(rule *Rule, req *ParsedRequest, partial *EvaluationResult, labelSet map[string]struct{}) bool {
+	w := &rule.When
+	if len(w.Methods) > 0 {
+		if !containsIgnoreCase(w.Methods, req.Method) {
 			return false
 		}
 	}
-
-	// Check path patterns
-	if len(rule.Conditions.PathPatterns) > 0 {
-		pathMatch := false
-		for _, pattern := range rule.Conditions.PathPatterns {
-			matched, _ := regexp.MatchString(pattern, req.NormalizedPath)
-			if matched {
-				pathMatch = true
+	if len(w.PathPrefix) > 0 {
+		match := false
+		for _, p := range w.PathPrefix {
+			if strings.HasPrefix(req.NormalizedPath, p) {
+				match = true
 				break
 			}
 		}
-		if !pathMatch {
+		if !match {
 			return false
 		}
 	}
-
+	if len(w.PathExclude) > 0 {
+		for _, p := range w.PathExclude {
+			if strings.HasPrefix(req.NormalizedPath, p) {
+				return false
+			}
+		}
+	}
+	// Score gating — use current accumulated score
+	if w.MinScore > 0 && partial.TotalScore < w.MinScore {
+		return false
+	}
+	if w.MaxScore > 0 && partial.TotalScore >= w.MaxScore {
+		return false
+	}
+	// Labels
+	if len(w.RequireLabels) > 0 {
+		for _, l := range w.RequireLabels {
+			if _, ok := labelSet[l]; !ok {
+				return false
+			}
+		}
+	}
+	if len(w.ExcludeLabels) > 0 {
+		for _, l := range w.ExcludeLabels {
+			if _, ok := labelSet[l]; ok {
+				return false
+			}
+		}
+	}
 	return true
 }
 
-// matchesException checks if request matches rule exception
-func (re *RuleEngine) matchesException(rule *Rule, req *ParsedRequest) bool {
-	// Check IP exceptions
-	for _, ip := range rule.Exceptions.IPs {
-		if req.ClientIP == ip {
+func matchesExcept(rule *Rule, req *ParsedRequest, labelSet map[string]struct{}) bool {
+	e := &rule.Except
+	if len(e.IPs) > 0 {
+		if ipInList(req.ClientIP, e.IPs) {
 			return true
 		}
 	}
-
-	// Check User-Agent exceptions
-	for _, ua := range rule.Exceptions.UserAgents {
-		if strings.Contains(req.UserAgent, ua) {
-			return true
+	if len(e.Paths) > 0 {
+		for _, p := range e.Paths {
+			if req.NormalizedPath == p {
+				return true
+			}
 		}
 	}
-
-	// Check path exceptions
-	for _, path := range rule.Exceptions.Paths {
-		if req.NormalizedPath == path {
-			return true
+	if len(e.PathPrefixes) > 0 {
+		for _, p := range e.PathPrefixes {
+			if strings.HasPrefix(req.NormalizedPath, p) {
+				return true
+			}
 		}
 	}
-
+	if len(e.UserAgents) > 0 {
+		ua := strings.ToLower(req.UserAgent)
+		for _, sub := range e.UserAgents {
+			if strings.Contains(ua, strings.ToLower(sub)) {
+				return true
+			}
+		}
+	}
+	if len(e.Labels) > 0 {
+		for _, l := range e.Labels {
+			if _, ok := labelSet[l]; ok {
+				return true
+			}
+		}
+	}
 	return false
 }
 
-// determineDecision determines action based on score
+func ipInList(client string, list []string) bool {
+	if client == "" {
+		return false
+	}
+	ip := net.ParseIP(client)
+	if ip == nil {
+		return false
+	}
+	for _, entry := range list {
+		if strings.Contains(entry, "/") {
+			_, ipnet, err := net.ParseCIDR(entry)
+			if err == nil && ipnet.Contains(ip) {
+				return true
+			}
+		} else if net.ParseIP(entry).Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// =========================================================================
+// Detect — boolean tree over multiple selectors
+// =========================================================================
+
+// evaluateDetect runs inspect→transform→detect.logic across all selectors.
+// Returns (hit, matchedOn, pattern, value, offset).
+func evaluateDetect(rule *Rule, req *ParsedRequest) (bool, string, string, string, int) {
+	inputs := resolveInputs(req, rule.Inspect)
+	logic := rule.Detect.Logic
+	if logic == "" {
+		logic = "any"
+	}
+
+	for label, raw := range inputs {
+		transformed := applyTransforms(raw, rule.Transforms, builtinTransforms)
+		switch logic {
+		case "all":
+			// all patterns must match against this transformed value
+			ok := true
+			lastIdx := 0
+			var lastDesc string
+			for i, p := range rule.Detect.Patterns {
+				m, off := matchPattern(rule, i, &p, transformed)
+				if !m {
+					ok = false
+					break
+				}
+				lastIdx = off
+				lastDesc = patternDescriptor(&p)
+			}
+			if ok {
+				return true, label, lastDesc, raw, lastIdx
+			}
+		default: // "any"
+			for i, p := range rule.Detect.Patterns {
+				m, off := matchPattern(rule, i, &p, transformed)
+				if m {
+					return true, label, patternDescriptor(&p), raw, off
+				}
+			}
+		}
+	}
+	return false, "", "", "", -1
+}
+
+func patternDescriptor(p *Pattern) string {
+	if p.Value != "" {
+		return p.Type + ":" + p.Value
+	}
+	if len(p.Values) > 0 {
+		return p.Type + ":" + strings.Join(p.Values, ",")
+	}
+	return p.Type
+}
+
+// =========================================================================
+// Misc
+// =========================================================================
+
 func (re *RuleEngine) determineDecision(score float64) string {
 	if score >= re.blockThreshold {
 		return "BLOCK"
@@ -464,7 +573,6 @@ func (re *RuleEngine) determineDecision(score float64) string {
 	return "ALLOW"
 }
 
-// updateMetrics updates rule metrics
 func (re *RuleEngine) updateMetrics(ruleID, category string) {
 	re.metrics.mu.Lock()
 	re.metrics.RuleHitCount[ruleID]++
@@ -472,32 +580,13 @@ func (re *RuleEngine) updateMetrics(ruleID, category string) {
 	re.metrics.mu.Unlock()
 }
 
-// RuleCount returns the number of loaded rules
 func (re *RuleEngine) RuleCount() int {
 	re.mu.RLock()
 	defer re.mu.RUnlock()
 	return len(re.rules)
 }
 
-// RuleSummary is a lightweight, JSON-friendly view of a loaded rule —
-// safe to expose via the dashboard API (omits compiled regex internals).
-type RuleSummary struct {
-	ID            string   `json:"id"`
-	Version       string   `json:"version,omitempty"`
-	Enabled       bool     `json:"enabled"`
-	Category      string   `json:"category"`
-	Severity      string   `json:"severity"`
-	Description   string   `json:"description,omitempty"`
-	Tags          []string `json:"tags,omitempty"`
-	Targets       []string `json:"targets,omitempty"`
-	Methods       []string `json:"methods,omitempty"`
-	AnomalyScore  int      `json:"anomaly_score"`
-	PatternCount  int      `json:"pattern_count"`
-	HitCount      int64    `json:"hit_count"`
-}
-
-// ListRules returns a snapshot of every loaded rule with hit counters
-// so the dashboard can render a useful rules table.
+// ListRules — preserves v1 API.
 func (re *RuleEngine) ListRules() []RuleSummary {
 	re.mu.RLock()
 	rules := make([]*Rule, len(re.rules))
@@ -513,29 +602,53 @@ func (re *RuleEngine) ListRules() []RuleSummary {
 
 	out := make([]RuleSummary, 0, len(rules))
 	for _, r := range rules {
+		targets := make([]string, 0, len(r.Inspect))
+		for _, s := range r.Inspect {
+			targets = append(targets, strings.ToUpper(s.Source))
+		}
 		out = append(out, RuleSummary{
 			ID:           r.ID,
 			Version:      r.Version,
 			Enabled:      r.Enabled,
-			Category:     r.Metadata.Category,
-			Severity:     r.Metadata.Severity,
-			Description:  r.Metadata.Description,
-			Tags:         r.Metadata.Tags,
-			Targets:      r.Conditions.Targets,
-			Methods:      r.Conditions.Methods,
-			AnomalyScore: r.Scoring.AnomalyScore,
-			PatternCount: len(r.Patterns),
+			Category:     r.Info.Category,
+			Severity:     strings.ToUpper(r.Info.Severity),
+			Description:  r.Info.Description,
+			Tags:         r.Info.Tags,
+			Targets:      targets,
+			Methods:      r.When.Methods,
+			AnomalyScore: int(r.Action.Score),
+			PatternCount: len(r.Detect.Patterns),
 			HitCount:     hits[r.ID],
 		})
 	}
 	return out
 }
 
-// GetMetrics returns a copy of metrics
+// GetRule returns the full Rule by ID (for the dashboard editor).
+func (re *RuleEngine) GetRule(id string) (*Rule, bool) {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+	r, ok := re.ruleCache[id]
+	return r, ok
+}
+
+// GetRuleJSON returns the rule as JSON (v2 schema).
+func (re *RuleEngine) GetRuleJSON(id string) ([]byte, bool) {
+	r, ok := re.GetRule(id)
+	if !ok {
+		return nil, false
+	}
+	b, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return nil, false
+	}
+	return b, true
+}
+
+// GetMetrics — preserves v1 API.
 func (re *RuleEngine) GetMetrics() *RuleMetrics {
 	re.metrics.mu.RLock()
 	defer re.metrics.mu.RUnlock()
-
 	metrics := &RuleMetrics{
 		TotalEvaluations: re.metrics.TotalEvaluations,
 		TotalMatches:     re.metrics.TotalMatches,
@@ -544,14 +657,31 @@ func (re *RuleEngine) GetMetrics() *RuleMetrics {
 		RuleHitCount:     make(map[string]int64),
 		CategoryStats:    make(map[string]int64),
 	}
-
 	for k, v := range re.metrics.RuleHitCount {
 		metrics.RuleHitCount[k] = v
 	}
-
 	for k, v := range re.metrics.CategoryStats {
 		metrics.CategoryStats[k] = v
 	}
-
 	return metrics
+}
+
+// =========================================================================
+// Utility
+// =========================================================================
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func containsIgnoreCase(list []string, val string) bool {
+	for _, x := range list {
+		if strings.EqualFold(x, val) {
+			return true
+		}
+	}
+	return false
 }

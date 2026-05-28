@@ -19,11 +19,24 @@ behavior:
   bruteforce_threshold: 5
   bruteforce_window: 300s
 
+  bot_detection_enabled: true
+  bot_score_threshold: 0.7
+
+  velocity_enabled: true
+  max_requests_per_second: 10
+
 decision:
   block_threshold: 5.0 # Block if score >= 5
   challenge_threshold: 4.0 # Challenge if score >= 4
   enable_whitelist: true  # Enable IP whitelisting
   enable_blacklist: true  # Enable IP blacklisting
+  # Path prefixes silently bypassed (no inspection, no audit log).
+  # Built-in list already covers /socket.io/, /sockjs-node/, /ws/, /_ws/,
+  # /health, /metrics, /dashboard, /waf-api/, etc. — only add app-specific
+  # noise here. Editable live from the dashboard.
+  bypass_paths: []
+    # - "/api/heartbeat"
+    # - "/_internal/poll"
 
 database:
   host: "localhost"
@@ -39,6 +52,20 @@ auth:
   jwt_expiry: "24h"
   bcrypt_cost: 10
   require_auth: false  # Set to true to enable authentication
+
+admin:
+  # Network-level isolation for ALL admin surfaces:
+  #   /dashboard/*, /login.html, /register.html, /waf-api/*, /admin/*, /metrics
+  #
+  # When local_only=true, requests from any client OUTSIDE allowed_cidrs get a
+  # flat 404 — outsiders can't even discover that an admin UI exists.
+  # Default (no `admin:` block) is local_only=true with loopback CIDRs.
+  local_only: true
+  allowed_cidrs:
+    - "127.0.0.0/8"   # IPv4 loopback
+    - "::1/128"       # IPv6 loopback
+    # - "10.0.0.0/8"    # add LAN subnet here if you need to admin from another box
+    # - "192.168.0.0/16"
 
 tls:
   enabled: true
@@ -66,3 +93,72 @@ training:
   skip_path_prefixes:
     # - "/internal/heartbeat"
     # - "/v2/probe"
+
+# ML inference bridge. Consulted only when a request's rule score falls in the
+# gray zone [gray_lower, gray_upper) — outside that band the rule engine is
+# decisive and we skip the model to save latency. Start the service with
+# `make ml-start` (or `make run`, which starts it automatically).
+ml:
+  enabled: true
+  endpoint: "http://127.0.0.1:8000"
+  timeout: 800ms
+  max_body_len: 4096
+
+  # Gray-zone bounds. Default block_threshold=5.0, challenge_threshold=4.0.
+  gray_lower: 4.0
+  gray_upper: 5.0
+
+  # Score adjustments applied when confidence ≥ confidence_threshold.
+  # 4.5 + 2.0 = 6.5 → BLOCK;  4.5 - 2.0 = 2.5 → ALLOW.
+  attack_bump: 2.0
+  normal_penalty: 2.0
+  confidence_threshold: 0.8
+
+  # Cache replay-heavy payloads (scanner loops, retries).
+  cache_size: 4096
+  cache_ttl: 5m
+
+  # Trip the circuit after N consecutive failures; cool down before retrying.
+  # When open, the rule-only score is used unchanged.
+  breaker_threshold: 5
+  breaker_cooldown: 30s
+
+# Outbound alerts. Disabled by default — toggle in the dashboard or here.
+# When enabled, BLOCK/CHALLENGE events with severity ≥ min_severity are
+# fanned out async to every *destination* whose `enabled` flag is true.
+# Each channel type holds a list of destinations — register many Slack
+# workspaces / email groups / webhook receivers in parallel.
+#
+# Dedup window suppresses duplicate (ip, rule_id) hits for `throttle_seconds`.
+# Manage destinations via /dashboard → tab Alerts → click a channel → Create.
+alerts:
+  enabled: false
+  min_severity: "HIGH"     # INFO / LOW / MEDIUM / HIGH / CRITICAL
+  throttle_seconds: 300    # 5-minute dedup per (IP, rule); 0 disables
+
+  # `id` is auto-assigned at startup when blank; keep it stable to preserve
+  # per-destination stats across restarts.
+  slack: []
+  # slack:
+  #   - { id: "", name: "Security on-call", enabled: true,
+  #       webhook_url: "https://hooks.slack.com/services/T000/B000/XXXX",
+  #       channel: "#waf-alerts", username: "WAF Sentinel",
+  #       message_template: "" }
+
+  email: []
+  # email:
+  #   - { id: "", name: "Ops team", enabled: true,
+  #       host: "smtp.gmail.com", port: 587,
+  #       username: "alerts@example.com", password: "app-password-here",
+  #       from: "waf@example.com",
+  #       to: ["ops@example.com", "sec@example.com"],
+  #       use_tls: false,
+  #       subject_template: "", body_template: "" }
+
+  webhook: []
+  # webhook:
+  #   - { id: "", name: "PagerDuty", enabled: true,
+  #       url: "https://events.pagerduty.com/v2/enqueue",
+  #       method: "POST",
+  #       headers: { Authorization: "Token token=YOUR_KEY" },
+  #       payload_template: "" }

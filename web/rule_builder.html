@@ -1,0 +1,1955 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rule Builder · WAF</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+:root, [data-theme="dark"] {
+  --bg-0:#07080d; --bg-1:#0d1018; --bg-2:#131826;
+  --line:rgba(148,163,184,0.10); --line-strong:rgba(148,163,184,0.18);
+  --fg-0:#f1f5f9; --fg-1:#cbd5e1; --fg-2:#94a3b8; --fg-3:#64748b;
+  --accent:#22d3ee; --accent-2:#818cf8; --accent-fg:#082f49;
+  --surface:rgba(255,255,255,0.025); --surface-strong:rgba(255,255,255,0.04); --surface-hover:rgba(255,255,255,0.06);
+  --shadow-card:0 1px 0 rgba(255,255,255,0.04) inset, 0 20px 60px -30px rgba(0,0,0,0.6);
+  --bg-radial-1:rgba(99,102,241,0.12); --bg-radial-2:rgba(34,211,238,0.10);
+  --good:#22c55e; --bad:#ef4444; --warn:#eab308;
+}
+[data-theme="light"] {
+  --bg-0:#f6f8fc; --bg-1:#ffffff; --bg-2:#f1f5f9;
+  --line:rgba(15,23,42,0.08); --line-strong:rgba(15,23,42,0.14);
+  --fg-0:#0f172a; --fg-1:#334155; --fg-2:#64748b; --fg-3:#94a3b8;
+  --accent:#0891b2; --accent-2:#6366f1; --accent-fg:#ffffff;
+  --surface:rgba(15,23,42,0.025); --surface-strong:rgba(15,23,42,0.04); --surface-hover:rgba(15,23,42,0.06);
+  --shadow-card:0 1px 0 rgba(255,255,255,0.7) inset, 0 12px 40px -20px rgba(15,23,42,0.18);
+  --bg-radial-1:rgba(99,102,241,0.08); --bg-radial-2:rgba(8,145,178,0.06);
+  --good:#16a34a; --bad:#dc2626; --warn:#ca8a04;
+}
+
+html, body { font-family:'Inter', system-ui, sans-serif; height:100%; }
+body {
+  margin:0;
+  background:
+    radial-gradient(1200px 600px at 80% -10%, var(--bg-radial-1), transparent 60%),
+    radial-gradient(900px 500px at -10% 10%, var(--bg-radial-2), transparent 55%),
+    linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 100%);
+  color: var(--fg-1);
+  -webkit-font-smoothing: antialiased;
+}
+code, pre, .mono { font-family:'JetBrains Mono', ui-monospace, monospace; }
+
+/* Header */
+.topbar {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 20px;
+  background: color-mix(in srgb, var(--bg-1) 85%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 800; color: var(--fg-0); font-size: 15px; letter-spacing: -0.01em; }
+.brand-dot { width:10px; height:10px; border-radius:999px; background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 0 14px var(--accent); }
+
+/* Glass card */
+.card {
+  background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface) 40%, transparent));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+.card-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid transparent;
+  transition: background .15s ease, border-color .15s ease;
+}
+.card-head:hover { background: var(--surface-hover); }
+.card.open .card-head { border-bottom-color: var(--line); }
+.card-head h3 { color: var(--fg-0); font-size: 13px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; margin: 0; }
+.card-head .sub { color: var(--fg-3); font-size: 12px; margin-left: 8px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+.card-body { padding: 16px 18px 20px; display: none; }
+.card.open .card-body { display: block; }
+.card .chev { transition: transform .2s ease; color: var(--fg-3); }
+.card.open .chev { transform: rotate(180deg); }
+
+/* Inputs */
+.input, .select, textarea.input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px 11px;
+  font-size: 13px;
+  color: var(--fg-0);
+  outline: none;
+  transition: all .15s ease;
+  font-family: inherit;
+}
+.input:hover, .select:hover { border-color: var(--line-strong); }
+.input:focus, .select:focus, textarea.input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.input.mono { font-family:'JetBrains Mono', monospace; font-size: 12px; }
+.input.err { border-color: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 18%, transparent); }
+.select {
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+}
+textarea.input { resize: vertical; min-height: 60px; }
+.input::placeholder, textarea.input::placeholder { color: var(--fg-3); }
+
+.label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-2);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.label .req { color: var(--bad); margin-left: 2px; }
+.hint { font-size: 11px; color: var(--fg-3); margin-top: 4px; line-height: 1.4; }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 8px 14px; border-radius: 9px;
+  font-size: 13px; font-weight: 600;
+  border: 1px solid transparent; cursor: pointer;
+  transition: all .15s ease;
+  background: var(--surface-strong); color: var(--fg-0); border-color: var(--line-strong);
+  font-family: inherit;
+}
+.btn:hover { background: var(--surface-hover); }
+.btn-primary {
+  background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 80%, black));
+  color: var(--accent-fg); border: 0;
+  box-shadow: 0 6px 20px -6px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 10px 26px -6px color-mix(in srgb, var(--accent) 60%, transparent); }
+.btn-danger { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.35); color: #fca5a5; }
+.btn-danger:hover { background: rgba(239,68,68,0.2); }
+.btn-icon { width: 28px; height: 28px; padding: 0; justify-content: center; }
+.btn:disabled { opacity:.4; cursor:not-allowed; transform:none !important; }
+.btn-sm { padding: 6px 10px; font-size: 12px; }
+
+/* Toggle */
+.toggle { position: relative; display: inline-flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
+.toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.toggle .switch {
+  width: 34px; height: 20px;
+  background: var(--surface-strong);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  position: relative;
+  transition: all .2s ease;
+}
+.toggle .switch::after {
+  content: '';
+  position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px;
+  background: var(--fg-2);
+  border-radius: 999px;
+  transition: all .2s ease;
+}
+.toggle input:checked + .switch {
+  background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 80%, black));
+  border-color: transparent;
+}
+.toggle input:checked + .switch::after { left: 16px; background: var(--accent-fg); }
+.toggle .lbl { font-size: 13px; color: var(--fg-0); font-weight: 500; }
+
+/* Chips (multi-select with order) */
+.chip-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip-btn {
+  padding: 5px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; letter-spacing: .04em;
+  background: var(--surface); border: 1px solid var(--line);
+  color: var(--fg-2); cursor: pointer; transition: all .15s ease;
+  font-family: inherit;
+}
+.chip-btn:hover { color: var(--fg-0); border-color: var(--line-strong); }
+.chip-btn.active {
+  background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 80%, black));
+  color: var(--accent-fg); border-color: transparent;
+  box-shadow: 0 4px 12px -4px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.chip-tag {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 4px 4px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px; font-weight: 500;
+  color: var(--fg-0);
+  font-family: 'JetBrains Mono', monospace;
+}
+.chip-tag button {
+  width: 16px; height: 16px; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--surface-strong); color: var(--fg-3);
+  cursor: pointer; border: 0;
+  font-size: 14px; line-height: 1;
+}
+.chip-tag button:hover { background: rgba(239,68,68,0.2); color: #fca5a5; }
+
+/* Dynamic list items */
+.list-item {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 8px;
+  position: relative;
+}
+.list-item:hover { border-color: var(--line-strong); }
+.list-item .item-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.list-item .item-bar .ord { font-size: 11px; color: var(--fg-3); font-weight: 600; min-width: 22px; text-align: center; }
+
+/* JSON preview */
+.json-pane {
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  height: 100%;
+}
+.json-pane .pane-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.json-pane pre {
+  flex: 1;
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg-1);
+  white-space: pre;
+  font-family: 'JetBrains Mono', monospace;
+}
+.json-pane pre.editable {
+  outline: none;
+  background: var(--bg-1);
+}
+
+/* JSON syntax colors */
+.tk-key   { color: var(--accent); }
+.tk-str   { color: #a3e635; }
+.tk-num   { color: #fbbf24; }
+.tk-bool  { color: #f472b6; }
+.tk-null  { color: var(--fg-3); }
+.tk-punct { color: var(--fg-3); }
+[data-theme="light"] .tk-str  { color: #15803d; }
+[data-theme="light"] .tk-num  { color: #b45309; }
+[data-theme="light"] .tk-bool { color: #be185d; }
+
+/* Validation summary */
+.val-summary {
+  border-top: 1px solid var(--line);
+  padding: 12px 16px;
+  font-size: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.val-row { display: flex; gap: 8px; padding: 4px 0; }
+.val-row .dot { width: 6px; height: 6px; border-radius: 999px; margin-top: 6px; flex-shrink: 0; }
+.val-row.err .dot { background: var(--bad); }
+.val-row.warn .dot { background: var(--warn); }
+.val-row.ok .dot { background: var(--good); }
+.val-row span { color: var(--fg-1); line-height: 1.5; }
+
+/* Toast */
+#toastWrap { position: fixed; bottom: 20px; right: 20px; z-index: 100; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.toast {
+  pointer-events: auto;
+  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--fg-0);
+  box-shadow: 0 20px 50px -20px rgba(0,0,0,0.5);
+  max-width: 360px;
+  display: flex; align-items: flex-start; gap: 10px;
+  animation: toastIn .2s ease both;
+}
+@keyframes toastIn { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
+.toast.success { border-left: 3px solid var(--good); }
+.toast.error { border-left: 3px solid var(--bad); }
+.toast.info { border-left: 3px solid var(--accent); }
+.toast .ticon { width: 18px; height: 18px; flex-shrink: 0; margin-top: 1px; }
+
+/* Modal */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: color-mix(in srgb, var(--bg-0) 80%, transparent);
+  backdrop-filter: blur(6px);
+  z-index: 50;
+  display: none;
+  align-items: center; justify-content: center;
+  padding: 20px;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  max-width: 560px; width: 100%;
+  max-height: 80vh; overflow: hidden;
+  display: flex; flex-direction: column;
+  box-shadow: 0 40px 80px -20px rgba(0,0,0,0.5);
+}
+.modal-head { padding: 16px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
+.modal-body { padding: 16px 20px; overflow-y: auto; flex: 1; }
+.modal-foot { padding: 12px 20px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-end; }
+
+/* Helpers */
+.row { display: grid; gap: 10px; }
+.row-2 { grid-template-columns: 1fr 1fr; }
+.row-3 { grid-template-columns: 1fr 1fr 1fr; }
+.row-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 720px) { .row-2, .row-3, .row-4 { grid-template-columns: 1fr; } }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--fg-3); background-clip: padding-box; }
+
+h1, h2, h3, h4 { color: var(--fg-0); }
+hr { border: 0; height: 1px; background: var(--line); margin: 14px 0; }
+
+/* Layout */
+.app {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  padding: 16px 20px 24px;
+  height: calc(100vh - 56px);
+}
+@media (max-width: 1100px) { .app { grid-template-columns: 1fr; height: auto; } }
+.form-pane { overflow-y: auto; padding-right: 4px; }
+.form-pane > .card { margin-bottom: 12px; }
+
+body.embed .topbar { display: none; }
+body.embed .app { padding-top: 16px; }
+</style>
+</head>
+<body>
+<script>
+  // Hide outer topbar (and brand link) when loaded inside the dashboard drawer.
+  if (new URLSearchParams(location.search).get('embed') === '1') {
+    document.documentElement.classList.add('embed');
+    document.addEventListener('DOMContentLoaded', () => document.body.classList.add('embed'));
+  }
+</script>
+
+<div class="topbar">
+  <a href="/" class="brand" style="text-decoration:none">
+    <span class="brand-dot"></span>
+    <span>WAF Console</span>
+    <span style="color:var(--fg-3); font-weight:500; margin-left:4px">/ Rule Builder</span>
+  </a>
+  <div style="flex:1"></div>
+  <button class="btn btn-sm" id="btnBrowse" title="Xem & chỉnh sửa rule đã có">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h7v7H3z"/><path d="M14 3h7v7h-7z"/><path d="M14 14h7v7h-7z"/><path d="M3 14h7v7H3z"/></svg>
+    Browse
+  </button>
+  <button class="btn btn-sm" id="btnTemplate" title="Bắt đầu từ template có sẵn">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+    Template
+  </button>
+  <button class="btn btn-sm" id="btnImport" title="Import JSON file">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    Import
+  </button>
+  <button class="btn btn-sm" id="btnExport" title="Tải JSON về máy">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Export
+  </button>
+  <button class="btn btn-sm" id="btnValidate" title="Kiểm tra schema">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    Validate
+  </button>
+  <button class="btn btn-primary btn-sm" id="btnSave">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+    Save to WAF
+  </button>
+  <button class="btn btn-icon btn-sm" id="btnTheme" title="Toggle theme">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+  </button>
+</div>
+
+<div class="app">
+
+  <!-- =================== FORM PANE =================== -->
+  <div class="form-pane" id="formPane">
+
+    <!-- 1. Identity -->
+    <section class="card open" data-section="identity">
+      <div class="card-head"><h3>Identity <span class="sub">ID · Version · Enabled</span></h3>
+        <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div class="card-body">
+        <div class="row row-3">
+          <div>
+            <label class="label">Rule ID <span class="req">*</span></label>
+            <input class="input mono" id="f_id" placeholder="WAF-001-SQLI-UNION">
+            <div class="hint">Định danh duy nhất. Format: <code>WAF-&lt;số&gt;-&lt;loại&gt;-&lt;biến thể&gt;</code></div>
+          </div>
+          <div>
+            <label class="label">Version</label>
+            <input class="input mono" id="f_version" value="2.0">
+          </div>
+          <div>
+            <label class="label">Trạng thái</label>
+            <label class="toggle" style="margin-top:6px">
+              <input type="checkbox" id="f_enabled" checked>
+              <span class="switch"></span>
+              <span class="lbl">Enabled</span>
+            </label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. Info -->
+    <section class="card open" data-section="info">
+      <div class="card-head"><h3>Info <span class="sub">Phân loại · Mức độ · Mô tả</span></h3>
+        <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div class="card-body">
+        <div class="row row-2">
+          <div>
+            <label class="label">Category <span class="req">*</span></label>
+            <select class="select" id="f_category">
+              <option value="sqli">SQL Injection (sqli)</option>
+              <option value="xss">XSS (xss)</option>
+              <option value="lfi">Path Traversal / LFI (lfi)</option>
+              <option value="rce">RCE / Command Injection (rce)</option>
+              <option value="ssrf">SSRF (ssrf)</option>
+              <option value="xxe">XXE (xxe)</option>
+              <option value="nosqli">NoSQL Injection (nosqli)</option>
+              <option value="scanner">Scanner (scanner)</option>
+              <option value="bot">Bot (bot)</option>
+              <option value="ato">Account Takeover (ato)</option>
+              <option value="dos">Denial of Service (dos)</option>
+              <option value="info_leak">Info Leak (info_leak)</option>
+              <option value="schema">Schema violation (schema)</option>
+              <option value="custom">Custom (custom)</option>
+            </select>
+          </div>
+          <div>
+            <label class="label">Severity <span class="req">*</span></label>
+            <select class="select" id="f_severity">
+              <option value="critical">critical (× 2.0)</option>
+              <option value="high">high (× 1.5)</option>
+              <option value="medium" selected>medium (× 1.0)</option>
+              <option value="low">low (× 0.5)</option>
+              <option value="info">info (× 0)</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-top:10px">
+          <label class="label">Description</label>
+          <textarea class="input" id="f_description" rows="2" placeholder="Phát hiện SQL Injection kiểu UNION-based..."></textarea>
+        </div>
+        <div class="row row-2" style="margin-top:10px">
+          <div>
+            <label class="label">Tags <span class="hint" style="display:inline">(Enter để thêm)</span></label>
+            <input class="input mono" id="f_tagInput" placeholder="sqli, owasp-a03, cwe-89">
+            <div class="chip-grid" id="f_tags" style="margin-top:8px"></div>
+          </div>
+          <div>
+            <div class="row row-2">
+              <div>
+                <label class="label">Author</label>
+                <input class="input" id="f_author" placeholder="NHT">
+              </div>
+              <div>
+                <label class="label">Created</label>
+                <input class="input mono" id="f_created" type="date">
+              </div>
+            </div>
+            <div style="margin-top:10px">
+              <label class="label">References (URL/CVE) <span class="hint" style="display:inline">(Enter để thêm)</span></label>
+              <input class="input mono" id="f_refInput" placeholder="https://owasp.org/...">
+              <div class="chip-grid" id="f_references" style="margin-top:8px"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. When -->
+    <section class="card" data-section="when">
+      <div class="card-head"><h3>When <span class="sub">Khi nào áp dụng rule</span></h3>
+        <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div class="card-body">
+        <label class="label">HTTP Methods</label>
+        <div class="chip-grid" id="f_methods">
+          <button class="chip-btn" data-method="GET">GET</button>
+          <button class="chip-btn" data-method="POST">POST</button>
+          <button class="chip-btn" data-method="PUT">PUT</button>
+          <button class="chip-btn" data-method="PATCH">PATCH</button>
+          <button class="chip-btn" data-method="DELETE">DELETE</button>
+          <button class="chip-btn" data-method="OPTIONS">OPTIONS</button>
+          <button class="chip-btn" data-method="HEAD">HEAD</button>
+        </div>
+        <div class="hint">Bỏ trống = áp dụng mọi method</div>
+
+        <hr>
+
+        <div class="row row-2">
+          <div>
+            <label class="label">Path prefix (include)</label>
+            <input class="input mono" id="f_pathPrefixInput" placeholder="/api/  (Enter)">
+            <div class="chip-grid" id="f_pathPrefix" style="margin-top:8px"></div>
+            <div class="hint">Chỉ chạy nếu path bắt đầu bằng. Bỏ trống = mọi path.</div>
+          </div>
+          <div>
+            <label class="label">Path exclude</label>
+            <input class="input mono" id="f_pathExcludeInput" placeholder="/health  (Enter)">
+            <div class="chip-grid" id="f_pathExclude" style="margin-top:8px"></div>
+            <div class="hint">Bỏ qua nếu path bắt đầu bằng.</div>
+          </div>
+        </div>
+
+        <hr>
+
+        <div class="row row-2">
+          <div>
+            <label class="label">Min score (gate)</label>
+            <input class="input mono" id="f_minScore" type="number" value="0" min="0" step="0.5">
+            <div class="hint">Chỉ chạy nếu score hiện tại ≥ ngưỡng. Dùng cho rule "amplifier".</div>
+          </div>
+          <div>
+            <label class="label">Max score (gate)</label>
+            <input class="input mono" id="f_maxScore" type="number" value="9999" min="0" step="0.5">
+            <div class="hint">Chỉ chạy nếu score &lt; ngưỡng. Dùng cho ML gray-zone.</div>
+          </div>
+        </div>
+
+        <hr>
+
+        <div class="row row-2">
+          <div>
+            <label class="label">Require labels</label>
+            <input class="input mono" id="f_requireLabelsInput" placeholder="sig:sqli  (Enter)">
+            <div class="chip-grid" id="f_requireLabels" style="margin-top:8px"></div>
+            <div class="hint">Chỉ chạy nếu request đã có TẤT CẢ label này.</div>
+          </div>
+          <div>
+            <label class="label">Exclude labels</label>
+            <input class="input mono" id="f_excludeLabelsInput" placeholder="bypass:admin  (Enter)">
+            <div class="chip-grid" id="f_excludeLabels" style="margin-top:8px"></div>
+            <div class="hint">Bỏ qua nếu request có BẤT KỲ label này.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. Inspect -->
+    <section class="card open" data-section="inspect">
+      <div class="card-head"><h3>Inspect <span class="sub">Lấy data từ đâu</span></h3>
+        <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div class="card-body">
+        <div id="f_inspectList"></div>
+        <button class="btn btn-sm" id="btnAddInspect" type="button">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add source
+        </button>
+        <div class="hint" style="margin-top:6px">Engine match trên mọi selector — 1 match là đủ.</div>
+      </div>
+    </section>
+
+    <!-- 5. Transforms -->
+    <section class="card" data-section="transforms">
+      <div class="card-head"><h3>Transforms <span class="sub">Chuẩn hoá data trước khi match</span></h3>
+        <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div class="card-body">
+        <div class="chip-grid" id="f_transformsAvailable"></div>
+        <hr>
+        <label class="label">Selected (chạy tuần tự theo thứ tự — kéo / dùng nút để đổi)</label>
+        <div id="f_transformsSelected"></div>
+      </div>
+    </section>
+
+    <!-- 6. Detect -->
+    <section class="card open" data-section="detect">
+      <div class="card-head"><h3>Detect <span class="sub">Pattern để match</span></h3>
+        <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div class="card-body">
+        <label class="label">Logic</label>
+        <div class="chip-grid">
+          <button class="chip-btn active" data-logic="any" id="logicAny">any (OR)</button>
+          <button class="chip-btn" data-logic="all" id="logicAll">all (AND)</button>
+        </div>
+        <div class="hint" style="margin-top:6px"><b>any</b>: 1 pattern match là đủ. <b>all</b>: mọi pattern phải match.</div>
+        <hr>
+        <div id="f_patternList"></div>
+        <button class="btn btn-sm" id="btnAddPattern" type="button">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add pattern
+        </button>
+      </div>
+    </section>
+
+    <!-- 7. Action -->
+    <section class="card open" data-section="action">
+      <div class="card-head"><h3>Action <span class="sub">Khi match thì làm gì</span></h3>
+        <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div class="card-body">
+        <div class="row row-2">
+          <div>
+            <label class="label">Score</label>
+            <input class="input mono" id="f_score" type="number" value="3" min="0" step="0.5">
+            <div class="hint">Điểm thô. Sẽ × severity multiplier khi cộng vào tổng.</div>
+          </div>
+          <div>
+            <label class="label">Labels</label>
+            <input class="input mono" id="f_labelsInput" placeholder="attack:sqli  (Enter)">
+            <div class="chip-grid" id="f_labels" style="margin-top:8px"></div>
+          </div>
+        </div>
+
+        <hr>
+
+        <div class="row row-3">
+          <label class="toggle">
+            <input type="checkbox" id="f_log" checked>
+            <span class="switch"></span>
+            <span class="lbl">Log audit</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="f_block">
+            <span class="switch"></span>
+            <span class="lbl">Force block</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="f_challenge">
+            <span class="switch"></span>
+            <span class="lbl">Challenge</span>
+          </label>
+        </div>
+        <div class="hint" style="margin-top:6px">Force block bỏ qua tổng score — chỉ dùng cho pattern rất chắc chắn (CVE virtual patch).</div>
+
+        <hr>
+
+        <!-- ML confirm -->
+        <label class="toggle" style="margin-bottom:8px">
+          <input type="checkbox" id="f_mlEnabled">
+          <span class="switch"></span>
+          <span class="lbl" style="font-weight:700">ML Confirm — gọi ML để xác nhận signature</span>
+        </label>
+        <div id="mlBox" style="display:none; padding:12px; background:var(--surface); border:1px solid var(--line); border-radius:10px">
+          <div class="row row-2">
+            <div>
+              <label class="label">Input source</label>
+              <select class="select" id="f_mlInput">
+                <option value="body">body</option>
+                <option value="args">args</option>
+                <option value="query">query</option>
+                <option value="uri">uri</option>
+                <option value="headers_all">headers_all</option>
+              </select>
+            </div>
+            <div>
+              <label class="label">Min confidence</label>
+              <input class="input mono" id="f_mlMinConf" type="number" value="0.7" min="0" max="1" step="0.05">
+            </div>
+          </div>
+          <div class="row row-2" style="margin-top:10px">
+            <div>
+              <label class="label">On attack → score +</label>
+              <input class="input mono" id="f_mlAddAttack" type="number" value="2" step="0.5">
+              <div class="hint">ML đồng ý → củng cố</div>
+            </div>
+            <div>
+              <label class="label">On normal → score −</label>
+              <input class="input mono" id="f_mlSubNormal" type="number" value="2" step="0.5">
+              <div class="hint">ML bác → trừ điểm (có thể là FP)</div>
+            </div>
+          </div>
+        </div>
+
+        <hr>
+
+        <!-- Track -->
+        <label class="toggle" style="margin-bottom:8px">
+          <input type="checkbox" id="f_trackEnabled">
+          <span class="switch"></span>
+          <span class="lbl" style="font-weight:700">Track — đếm số lần match (chống brute force / scanner)</span>
+        </label>
+        <div id="trackBox" style="display:none; padding:12px; background:var(--surface); border:1px solid var(--line); border-radius:10px">
+          <div class="row row-3">
+            <div>
+              <label class="label">Scope</label>
+              <select class="select" id="f_trackScope">
+                <option value="ip">ip</option>
+                <option value="session">session</option>
+                <option value="global">global</option>
+              </select>
+            </div>
+            <div>
+              <label class="label">Counter name</label>
+              <input class="input mono" id="f_trackCounter" placeholder="sqli_attempts">
+            </div>
+            <div>
+              <label class="label">TTL (phút)</label>
+              <input class="input mono" id="f_trackTTL" type="number" value="10" min="1">
+            </div>
+          </div>
+          <div class="row row-2" style="margin-top:10px">
+            <div>
+              <label class="label">Threshold</label>
+              <input class="input mono" id="f_trackThreshold" type="number" value="5" min="1">
+              <div class="hint">Số lần để trigger</div>
+            </div>
+            <div>
+              <label class="label">On threshold → score +</label>
+              <input class="input mono" id="f_trackScore" type="number" value="5" step="0.5">
+            </div>
+          </div>
+          <div style="margin-top:10px">
+            <label class="label">On threshold → add labels</label>
+            <input class="input mono" id="f_trackLabelsInput" placeholder="repeat:sqli  (Enter)">
+            <div class="chip-grid" id="f_trackLabels" style="margin-top:8px"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8. Except -->
+    <section class="card" data-section="except">
+      <div class="card-head"><h3>Except <span class="sub">Whitelist (skip rule)</span></h3>
+        <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      </div>
+      <div class="card-body">
+        <div class="row row-2">
+          <div>
+            <label class="label">IPs / CIDR</label>
+            <input class="input mono" id="f_exIpsInput" placeholder="10.0.0.0/8  (Enter)">
+            <div class="chip-grid" id="f_exIps" style="margin-top:8px"></div>
+          </div>
+          <div>
+            <label class="label">Paths (exact)</label>
+            <input class="input mono" id="f_exPathsInput" placeholder="/admin/sql-console  (Enter)">
+            <div class="chip-grid" id="f_exPaths" style="margin-top:8px"></div>
+          </div>
+          <div>
+            <label class="label">Path prefixes</label>
+            <input class="input mono" id="f_exPathPrefixesInput" placeholder="/internal/  (Enter)">
+            <div class="chip-grid" id="f_exPathPrefixes" style="margin-top:8px"></div>
+          </div>
+          <div>
+            <label class="label">User-Agents (substring)</label>
+            <input class="input mono" id="f_exUAInput" placeholder="HealthCheck  (Enter)">
+            <div class="chip-grid" id="f_exUA" style="margin-top:8px"></div>
+          </div>
+        </div>
+        <div style="margin-top:10px">
+          <label class="label">Skip if labels present</label>
+          <input class="input mono" id="f_exLabelsInput" placeholder="bypass:admin  (Enter)">
+          <div class="chip-grid" id="f_exLabels" style="margin-top:8px"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- =================== JSON PANE =================== -->
+  <div class="json-pane">
+    <div class="pane-head">
+      <div style="display:flex; align-items:center; gap:8px">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        <strong style="color:var(--fg-0); font-size:13px">JSON Preview</strong>
+        <span class="mono" style="color:var(--fg-3); font-size:11px" id="jsonLines">0 lines</span>
+      </div>
+      <div style="display:flex; gap:6px">
+        <button class="btn btn-sm" id="btnEditJson" title="Bật chế độ edit để paste JSON">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          Edit
+        </button>
+        <button class="btn btn-sm" id="btnCopy" title="Copy JSON">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          Copy
+        </button>
+      </div>
+    </div>
+    <pre id="jsonPreview"></pre>
+    <div class="val-summary" id="valSummary">
+      <div class="val-row ok"><span class="dot"></span><span>Chưa validate. Nhấn <b>Validate</b> để kiểm tra schema.</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- Template modal -->
+<div class="modal-overlay" id="modalTemplate">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 style="margin:0; font-size:14px; font-weight:700">Chọn template</h3>
+      <button class="btn btn-icon btn-sm" id="modalTemplateClose">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="templateList"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Browse rules modal -->
+<div class="modal-overlay" id="modalBrowse">
+  <div class="modal" style="max-width:760px">
+    <div class="modal-head">
+      <h3 style="margin:0; font-size:14px; font-weight:700">Rules đã có trong WAF</h3>
+      <div style="display:flex; gap:8px; align-items:center">
+        <input id="browseFilter" class="input" placeholder="Lọc theo ID / category / tag..." style="width:280px">
+        <button class="btn btn-icon btn-sm" id="modalBrowseClose">✕</button>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div id="browseStats" style="font-size:12px; color:var(--fg-3); margin-bottom:10px"></div>
+      <div id="browseList"></div>
+    </div>
+  </div>
+</div>
+
+<div id="toastWrap"></div>
+
+<script>
+'use strict';
+
+/* ========================================================================
+   1. STATE
+   ======================================================================== */
+
+const DEFAULT_RULE = () => ({
+  id: '',
+  version: '2.0',
+  enabled: true,
+  info: {
+    category: 'sqli',
+    severity: 'medium',
+    description: '',
+    tags: [],
+    references: [],
+    author: '',
+    created: new Date().toISOString().slice(0, 10),
+  },
+  when: {
+    methods: [],
+    path_prefix: [],
+    path_exclude: [],
+    min_score: 0,
+    max_score: 9999,
+    require_labels: [],
+    exclude_labels: [],
+  },
+  inspect: [{ source: 'args' }],
+  transforms: ['url_decode', 'lowercase'],
+  detect: {
+    logic: 'any',
+    patterns: [{ type: 'regex', value: '', flags: '', negate: false }],
+  },
+  action: {
+    score: 3,
+    labels: [],
+    log: true,
+    block: false,
+    challenge: false,
+    ml_confirm: {
+      enabled: false,
+      input: 'body',
+      min_confidence: 0.7,
+      on_attack_add: 2,
+      on_normal_subtract: 2,
+    },
+    track: {
+      enabled: false,
+      scope: 'ip',
+      counter: '',
+      ttl_minutes: 10,
+      threshold: 5,
+      on_threshold_score: 5,
+      on_threshold_labels: [],
+    },
+  },
+  except: {
+    ips: [],
+    paths: [],
+    path_prefixes: [],
+    user_agents: [],
+    labels: [],
+  },
+});
+
+let rule = DEFAULT_RULE();
+let editingJson = false;
+
+/* ========================================================================
+   2. CONSTANTS
+   ======================================================================== */
+
+const INSPECT_SOURCES = [
+  { v: 'path',         needsName: false },
+  { v: 'query',        needsName: false },
+  { v: 'uri',          needsName: false },
+  { v: 'body',         needsName: false },
+  { v: 'args',         needsName: false },
+  { v: 'header',       needsName: true,  ph: 'User-Agent' },
+  { v: 'headers_all',  needsName: false },
+  { v: 'cookie',       needsName: true,  ph: 'session' },
+  { v: 'cookies_all',  needsName: false },
+  { v: 'ip',           needsName: false },
+  { v: 'user_agent',   needsName: false },
+];
+
+const TRANSFORMS = [
+  'url_decode', 'lowercase', 'uppercase', 'html_decode',
+  'base64_decode', 'hex_decode', 'remove_nulls',
+  'remove_whitespace', 'compress_whitespace', 'replace_comments',
+  'cmd_normalize', 'normalize_path', 'trim',
+];
+
+const PATTERN_TYPES = [
+  { v: 'regex',       hint: 'Go RE2 regex, dùng flags i/m/s' },
+  { v: 'contains',    hint: 'Substring (nhanh hơn regex)' },
+  { v: 'starts_with', hint: 'Tiền tố' },
+  { v: 'ends_with',   hint: 'Hậu tố' },
+  { v: 'equals',      hint: 'Bằng chính xác' },
+  { v: 'wordlist',    hint: 'Một trong danh sách từ (comma)' },
+  { v: 'entropy_gt',  hint: 'Shannon entropy > N' },
+  { v: 'length_gt',   hint: 'Độ dài > N' },
+  { v: 'length_lt',   hint: 'Độ dài < N' },
+  { v: 'ip_match',    hint: 'IP / CIDR (dùng với source ip)' },
+];
+
+const TEMPLATES = [
+  {
+    name: 'SQLi UNION-based (signature cơ bản)',
+    desc: 'Match union select pattern, không gọi ML',
+    rule: () => {
+      const r = DEFAULT_RULE();
+      r.id = 'WAF-001-SQLI-UNION';
+      r.info = { ...r.info, category: 'sqli', severity: 'critical', description: 'UNION-based SQL injection (signature)', tags: ['sqli','owasp-a03','cwe-89'] };
+      r.when.methods = ['GET','POST','PUT'];
+      r.when.path_exclude = ['/health','/metrics'];
+      r.inspect = [{source:'args'},{source:'path'},{source:'uri'}];
+      r.transforms = ['url_decode','lowercase','compress_whitespace','replace_comments'];
+      r.detect.patterns = [{ type:'regex', value:'\\bunion\\b[\\s\\S]{0,40}\\bselect\\b', flags:'', negate:false }];
+      r.action.score = 5;
+      r.action.labels = ['attack:sqli','sig:union'];
+      return r;
+    },
+  },
+  {
+    name: 'XSS script-tag (signature + ML confirm)',
+    desc: 'Match <script> tag, gọi ML xác nhận để giảm FP',
+    rule: () => {
+      const r = DEFAULT_RULE();
+      r.id = 'WAF-006-XSS-SCRIPT';
+      r.info = { ...r.info, category: 'xss', severity: 'high', description: 'Detects <script> tag injection', tags: ['xss','owasp-a03'] };
+      r.inspect = [{source:'args'},{source:'body'},{source:'header',name:'Referer'}];
+      r.transforms = ['url_decode','lowercase','html_decode'];
+      r.detect.patterns = [{ type:'regex', value:'<script[\\s>]', flags:'', negate:false }];
+      r.action.score = 4;
+      r.action.labels = ['attack:xss'];
+      r.action.ml_confirm = { enabled:true, input:'args', min_confidence:0.7, on_attack_add:2, on_normal_subtract:2 };
+      return r;
+    },
+  },
+  {
+    name: 'Log4Shell virtual patch (force block)',
+    desc: 'CVE-2021-44228, action.block: true, score cao',
+    rule: () => {
+      const r = DEFAULT_RULE();
+      r.id = 'WAF-CVE-2021-44228-LOG4SHELL';
+      r.info = { ...r.info, category: 'rce', severity: 'critical', description: 'Virtual patch for Log4Shell — JNDI lookup detection', tags: ['rce','cve-2021-44228','log4shell','virtual-patch'], references: ['https://nvd.nist.gov/vuln/detail/CVE-2021-44228'] };
+      r.inspect = [{source:'args'},{source:'headers_all'},{source:'body'},{source:'cookies_all'}];
+      r.transforms = ['url_decode','lowercase','html_decode','compress_whitespace'];
+      r.detect.patterns = [{ type:'regex', value:'\\$\\{\\s*jndi\\s*:', flags:'', negate:false }];
+      r.action.score = 10;
+      r.action.labels = ['attack:rce','cve:CVE-2021-44228'];
+      r.action.block = true;
+      return r;
+    },
+  },
+  {
+    name: 'Scanner UA + IP tracking',
+    desc: 'Match scanner UA (sqlmap, nikto…) + đếm số lần theo IP',
+    rule: () => {
+      const r = DEFAULT_RULE();
+      r.id = 'WAF-024-SCANNER-UA';
+      r.info = { ...r.info, category: 'scanner', severity: 'medium', description: 'Known scanner User-Agents', tags: ['scanner','fingerprint'] };
+      r.inspect = [{source:'user_agent'}];
+      r.transforms = ['lowercase'];
+      r.detect.patterns = [{ type:'wordlist', value:'sqlmap,nikto,nmap,masscan,wpscan,dirbuster,gobuster,ffuf,havij,acunetix,burp,zaproxy,metasploit,wfuzz', flags:'', negate:false }];
+      r.action.score = 5;
+      r.action.labels = ['attack:scanner'];
+      r.action.track = { enabled:true, scope:'ip', counter:'scanner_hits', ttl_minutes:30, threshold:3, on_threshold_score:5, on_threshold_labels:['repeat:scanner'] };
+      return r;
+    },
+  },
+  {
+    name: 'Brute-force /login (tracking thuần)',
+    desc: 'Không signature, chỉ đếm POST /login theo IP',
+    rule: () => {
+      const r = DEFAULT_RULE();
+      r.id = 'WAF-103-ATO-BRUTE-LOGIN';
+      r.info = { ...r.info, category: 'ato', severity: 'high', description: 'Brute force on /login — POST quá 10 lần trong 5 phút', tags: ['ato','brute-force','behavioral'] };
+      r.when = { ...r.when, methods: ['POST'], path_prefix: ['/login','/api/login','/auth/signin'] };
+      r.inspect = [{source:'path'}];
+      r.transforms = [];
+      r.detect.patterns = [{ type:'starts_with', value:'/', flags:'', negate:false }];
+      r.action.score = 0;
+      r.action.log = false;
+      r.action.track = { enabled:true, scope:'ip', counter:'login_attempts', ttl_minutes:5, threshold:10, on_threshold_score:8, on_threshold_labels:['attack:brute-force'] };
+      return r;
+    },
+  },
+  {
+    name: 'ML gray-zone (consult ML khi score 3-7)',
+    desc: 'Chỉ chạy khi score đã ở vùng nghi ngờ',
+    rule: () => {
+      const r = DEFAULT_RULE();
+      r.id = 'WAF-200-ML-GRAYZONE';
+      r.info = { ...r.info, category: 'custom', severity: 'info', description: 'Consult ML in gray zone, adjust score', tags: ['ml','gray-zone','hybrid'] };
+      r.when.min_score = 3;
+      r.when.max_score = 7;
+      r.inspect = [{source:'body'}];
+      r.transforms = ['url_decode'];
+      r.detect.patterns = [{ type:'length_gt', value:'0', flags:'', negate:false }];
+      r.action.score = 0;
+      r.action.log = false;
+      r.action.labels = ['ml:consulted'];
+      r.action.ml_confirm = { enabled:true, input:'body', min_confidence:0.7, on_attack_add:3, on_normal_subtract:3 };
+      return r;
+    },
+  },
+  { name: 'Rule trống (bắt đầu từ con số 0)', desc: 'Schema mặc định, tự fill', rule: () => DEFAULT_RULE() },
+];
+
+/* ========================================================================
+   3. UTIL
+   ======================================================================== */
+
+function $(id) { return document.getElementById(id); }
+function el(tag, attrs = {}, ...children) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v;
+    else if (k === 'style') e.setAttribute('style', v);
+    else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2).toLowerCase(), v);
+    else if (k === 'html') e.innerHTML = v;
+    else e.setAttribute(k, v);
+  }
+  for (const c of children) {
+    if (c == null) continue;
+    if (typeof c === 'string' || typeof c === 'number') e.appendChild(document.createTextNode(String(c)));
+    else e.appendChild(c);
+  }
+  return e;
+}
+
+function toast(msg, type = 'info', timeoutMs = 3000) {
+  const wrap = $('toastWrap');
+  const ico = {
+    success: '<svg class="ticon" viewBox="0 0 24 24" fill="none" stroke="var(--good)" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>',
+    error:   '<svg class="ticon" viewBox="0 0 24 24" fill="none" stroke="var(--bad)" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
+    info:    '<svg class="ticon" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
+  }[type] || '';
+  const t = el('div', { class: `toast ${type}`, html: ico + `<div>${escapeHtml(msg)}</div>` });
+  wrap.appendChild(t);
+  setTimeout(() => { t.style.opacity = '0'; t.style.transform = 'translateX(20px)'; setTimeout(() => t.remove(), 300); }, timeoutMs);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function syntaxHighlight(json) {
+  if (typeof json !== 'string') json = JSON.stringify(json, null, 2);
+  json = escapeHtml(json);
+  return json.replace(
+    /("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)/g,
+    m => {
+      let cls = 'tk-num';
+      if (/^"/.test(m)) cls = /:$/.test(m) ? 'tk-key' : 'tk-str';
+      else if (/true|false/.test(m)) cls = 'tk-bool';
+      else if (/null/.test(m)) cls = 'tk-null';
+      return `<span class="${cls}">${m}</span>`;
+    },
+  );
+}
+
+/* ========================================================================
+   4. CHIP INPUT (reusable for tags / labels / paths / etc.)
+   ======================================================================== */
+
+function bindChipInput(inputId, listId, getArr, setArr, opts = {}) {
+  const input = $(inputId);
+  const list = $(listId);
+  if (!input || !list) return;
+
+  function commit(raw) {
+    if (raw == null) return;
+    const items = String(raw).split(',').map(s => s.trim()).filter(Boolean);
+    if (!items.length) return;
+    const arr = getArr().slice();
+    for (const it of items) if (!arr.includes(it)) arr.push(it);
+    setArr(arr);
+    input.value = '';
+    render();
+    update();
+  }
+
+  function render() {
+    list.innerHTML = '';
+    for (const v of getArr()) {
+      const chip = el('span', { class: 'chip-tag' }, v,
+        el('button', { type: 'button', onclick: () => {
+          setArr(getArr().filter(x => x !== v));
+          render();
+          update();
+        } }, '×')
+      );
+      list.appendChild(chip);
+    }
+  }
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || (opts.commaCommit && e.key === ',')) {
+      e.preventDefault();
+      commit(input.value);
+    } else if (e.key === 'Backspace' && input.value === '') {
+      const arr = getArr().slice();
+      arr.pop();
+      setArr(arr);
+      render();
+      update();
+    }
+  });
+  input.addEventListener('blur', () => { if (input.value.trim()) commit(input.value); });
+
+  render();
+  return { render };
+}
+
+/* ========================================================================
+   5. SECTION RENDERERS
+   ======================================================================== */
+
+function renderInspect() {
+  const wrap = $('f_inspectList');
+  wrap.innerHTML = '';
+  rule.inspect.forEach((sel, i) => {
+    const meta = INSPECT_SOURCES.find(s => s.v === sel.source) || { needsName: false };
+
+    const sourceSelect = el('select', { class: 'select' });
+    for (const s of INSPECT_SOURCES) {
+      const o = el('option', { value: s.v }, s.v);
+      if (s.v === sel.source) o.selected = true;
+      sourceSelect.appendChild(o);
+    }
+    sourceSelect.onchange = () => {
+      rule.inspect[i].source = sourceSelect.value;
+      const m = INSPECT_SOURCES.find(s => s.v === sourceSelect.value);
+      if (!m.needsName) delete rule.inspect[i].name;
+      renderInspect();
+      update();
+    };
+
+    const nameInput = el('input', {
+      class: 'input mono',
+      placeholder: meta.ph || 'header/cookie name',
+      value: sel.name || '',
+      style: meta.needsName ? '' : 'opacity:.4; pointer-events:none',
+    });
+    nameInput.oninput = () => { rule.inspect[i].name = nameInput.value; update(); };
+
+    const removeBtn = el('button', { class: 'btn btn-icon btn-sm btn-danger', type: 'button', title: 'Remove',
+      onclick: () => { rule.inspect.splice(i, 1); renderInspect(); update(); },
+    }, '×');
+
+    const row = el('div', { class: 'list-item' },
+      el('div', { class: 'item-bar' },
+        el('span', { class: 'ord' }, `#${i + 1}`),
+        el('div', { style: 'flex:1; display:grid; grid-template-columns: 200px 1fr auto; gap:8px' },
+          sourceSelect, nameInput, removeBtn,
+        ),
+      ),
+    );
+    wrap.appendChild(row);
+  });
+}
+
+function renderTransforms() {
+  const avail = $('f_transformsAvailable');
+  const sel = $('f_transformsSelected');
+  avail.innerHTML = '';
+  sel.innerHTML = '';
+
+  for (const t of TRANSFORMS) {
+    const active = rule.transforms.includes(t);
+    const btn = el('button', { class: `chip-btn ${active ? 'active' : ''}`, type: 'button',
+      onclick: () => {
+        if (active) rule.transforms = rule.transforms.filter(x => x !== t);
+        else rule.transforms.push(t);
+        renderTransforms();
+        update();
+      },
+    }, t);
+    avail.appendChild(btn);
+  }
+
+  if (rule.transforms.length === 0) {
+    sel.appendChild(el('div', { style: 'color:var(--fg-3); font-size:12px; padding:6px 0' }, 'Chưa chọn transform nào.'));
+  } else {
+    rule.transforms.forEach((t, i) => {
+      const upBtn = el('button', { class: 'btn btn-icon btn-sm', type: 'button', title: 'Move up',
+        onclick: () => { if (i === 0) return; [rule.transforms[i-1], rule.transforms[i]] = [rule.transforms[i], rule.transforms[i-1]]; renderTransforms(); update(); },
+      }, '↑');
+      const downBtn = el('button', { class: 'btn btn-icon btn-sm', type: 'button', title: 'Move down',
+        onclick: () => { if (i === rule.transforms.length - 1) return; [rule.transforms[i+1], rule.transforms[i]] = [rule.transforms[i], rule.transforms[i+1]]; renderTransforms(); update(); },
+      }, '↓');
+      const rmBtn = el('button', { class: 'btn btn-icon btn-sm btn-danger', type: 'button', title: 'Remove',
+        onclick: () => { rule.transforms.splice(i, 1); renderTransforms(); update(); },
+      }, '×');
+      const row = el('div', { class: 'list-item' },
+        el('div', { class: 'item-bar' },
+          el('span', { class: 'ord' }, `#${i + 1}`),
+          el('span', { class: 'mono', style: 'flex:1; color:var(--fg-0); font-size:13px' }, t),
+          upBtn, downBtn, rmBtn,
+        ),
+      );
+      sel.appendChild(row);
+    });
+  }
+}
+
+function renderPatterns() {
+  const wrap = $('f_patternList');
+  wrap.innerHTML = '';
+  rule.detect.patterns.forEach((p, i) => {
+    const typeSel = el('select', { class: 'select' });
+    for (const t of PATTERN_TYPES) {
+      const o = el('option', { value: t.v }, t.v);
+      if (t.v === p.type) o.selected = true;
+      typeSel.appendChild(o);
+    }
+    typeSel.onchange = () => { rule.detect.patterns[i].type = typeSel.value; renderPatterns(); update(); };
+    const meta = PATTERN_TYPES.find(t => t.v === p.type) || PATTERN_TYPES[0];
+
+    const valueInput = el('input', { class: 'input mono', placeholder: meta.hint, value: p.value || '' });
+    valueInput.oninput = () => { rule.detect.patterns[i].value = valueInput.value; update(); };
+
+    const flagsInput = el('input', { class: 'input mono', placeholder: 'i / m / s', value: p.flags || '', style: 'max-width: 110px' });
+    flagsInput.oninput = () => { rule.detect.patterns[i].flags = flagsInput.value; update(); };
+
+    const negToggle = el('label', { class: 'toggle' },
+      (() => {
+        const cb = el('input', { type: 'checkbox' });
+        cb.checked = !!p.negate;
+        cb.onchange = () => { rule.detect.patterns[i].negate = cb.checked; update(); };
+        return cb;
+      })(),
+      el('span', { class: 'switch' }),
+      el('span', { class: 'lbl', style: 'font-size:11px' }, 'negate'),
+    );
+
+    const rmBtn = el('button', { class: 'btn btn-icon btn-sm btn-danger', type: 'button',
+      onclick: () => { rule.detect.patterns.splice(i, 1); renderPatterns(); update(); },
+    }, '×');
+
+    const row = el('div', { class: 'list-item' },
+      el('div', { class: 'item-bar' },
+        el('span', { class: 'ord' }, `#${i + 1}`),
+        el('div', { style: 'flex:1; display:grid; grid-template-columns: 130px 1fr 110px auto auto; gap:8px; align-items:center' },
+          typeSel, valueInput, flagsInput, negToggle, rmBtn,
+        ),
+      ),
+      el('div', { style: 'font-size:11px; color:var(--fg-3); margin-top:4px; padding-left:30px' }, meta.hint),
+    );
+    wrap.appendChild(row);
+  });
+}
+
+/* ========================================================================
+   6. FORM ↔ STATE BINDING
+   ======================================================================== */
+
+function bindAll() {
+  // Identity
+  $('f_id').oninput = e => { rule.id = e.target.value; update(); };
+  $('f_version').oninput = e => { rule.version = e.target.value; update(); };
+  $('f_enabled').onchange = e => { rule.enabled = e.target.checked; update(); };
+
+  // Info
+  $('f_category').onchange = e => { rule.info.category = e.target.value; update(); };
+  $('f_severity').onchange = e => { rule.info.severity = e.target.value; update(); };
+  $('f_description').oninput = e => { rule.info.description = e.target.value; update(); };
+  $('f_author').oninput = e => { rule.info.author = e.target.value; update(); };
+  $('f_created').oninput = e => { rule.info.created = e.target.value; update(); };
+
+  // Tags
+  bindChipInput('f_tagInput', 'f_tags', () => rule.info.tags, v => { rule.info.tags = v; }, { commaCommit: true });
+  bindChipInput('f_refInput', 'f_references', () => rule.info.references, v => { rule.info.references = v; });
+
+  // When — methods (chip toggle)
+  document.querySelectorAll('#f_methods .chip-btn').forEach(b => {
+    b.onclick = () => {
+      const m = b.dataset.method;
+      if (rule.when.methods.includes(m)) rule.when.methods = rule.when.methods.filter(x => x !== m);
+      else rule.when.methods.push(m);
+      b.classList.toggle('active');
+      update();
+    };
+  });
+
+  bindChipInput('f_pathPrefixInput', 'f_pathPrefix', () => rule.when.path_prefix, v => { rule.when.path_prefix = v; });
+  bindChipInput('f_pathExcludeInput', 'f_pathExclude', () => rule.when.path_exclude, v => { rule.when.path_exclude = v; });
+  bindChipInput('f_requireLabelsInput', 'f_requireLabels', () => rule.when.require_labels, v => { rule.when.require_labels = v; });
+  bindChipInput('f_excludeLabelsInput', 'f_excludeLabels', () => rule.when.exclude_labels, v => { rule.when.exclude_labels = v; });
+
+  $('f_minScore').oninput = e => { rule.when.min_score = parseFloat(e.target.value) || 0; update(); };
+  $('f_maxScore').oninput = e => { rule.when.max_score = parseFloat(e.target.value) || 0; update(); };
+
+  // Inspect
+  $('btnAddInspect').onclick = () => { rule.inspect.push({ source: 'args' }); renderInspect(); update(); };
+
+  // Detect — logic
+  $('logicAny').onclick = () => {
+    rule.detect.logic = 'any';
+    $('logicAny').classList.add('active');
+    $('logicAll').classList.remove('active');
+    update();
+  };
+  $('logicAll').onclick = () => {
+    rule.detect.logic = 'all';
+    $('logicAll').classList.add('active');
+    $('logicAny').classList.remove('active');
+    update();
+  };
+  $('btnAddPattern').onclick = () => {
+    rule.detect.patterns.push({ type: 'regex', value: '', flags: '', negate: false });
+    renderPatterns();
+    update();
+  };
+
+  // Action core
+  $('f_score').oninput = e => { rule.action.score = parseFloat(e.target.value) || 0; update(); };
+  bindChipInput('f_labelsInput', 'f_labels', () => rule.action.labels, v => { rule.action.labels = v; });
+  $('f_log').onchange = e => { rule.action.log = e.target.checked; update(); };
+  $('f_block').onchange = e => { rule.action.block = e.target.checked; update(); };
+  $('f_challenge').onchange = e => { rule.action.challenge = e.target.checked; update(); };
+
+  // ML
+  $('f_mlEnabled').onchange = e => {
+    rule.action.ml_confirm.enabled = e.target.checked;
+    $('mlBox').style.display = e.target.checked ? 'block' : 'none';
+    update();
+  };
+  $('f_mlInput').onchange = e => { rule.action.ml_confirm.input = e.target.value; update(); };
+  $('f_mlMinConf').oninput = e => { rule.action.ml_confirm.min_confidence = parseFloat(e.target.value) || 0; update(); };
+  $('f_mlAddAttack').oninput = e => { rule.action.ml_confirm.on_attack_add = parseFloat(e.target.value) || 0; update(); };
+  $('f_mlSubNormal').oninput = e => { rule.action.ml_confirm.on_normal_subtract = parseFloat(e.target.value) || 0; update(); };
+
+  // Track
+  $('f_trackEnabled').onchange = e => {
+    rule.action.track.enabled = e.target.checked;
+    $('trackBox').style.display = e.target.checked ? 'block' : 'none';
+    update();
+  };
+  $('f_trackScope').onchange = e => { rule.action.track.scope = e.target.value; update(); };
+  $('f_trackCounter').oninput = e => { rule.action.track.counter = e.target.value; update(); };
+  $('f_trackTTL').oninput = e => { rule.action.track.ttl_minutes = parseInt(e.target.value) || 0; update(); };
+  $('f_trackThreshold').oninput = e => { rule.action.track.threshold = parseInt(e.target.value) || 0; update(); };
+  $('f_trackScore').oninput = e => { rule.action.track.on_threshold_score = parseFloat(e.target.value) || 0; update(); };
+  bindChipInput('f_trackLabelsInput', 'f_trackLabels', () => rule.action.track.on_threshold_labels, v => { rule.action.track.on_threshold_labels = v; });
+
+  // Except
+  bindChipInput('f_exIpsInput', 'f_exIps', () => rule.except.ips, v => { rule.except.ips = v; });
+  bindChipInput('f_exPathsInput', 'f_exPaths', () => rule.except.paths, v => { rule.except.paths = v; });
+  bindChipInput('f_exPathPrefixesInput', 'f_exPathPrefixes', () => rule.except.path_prefixes, v => { rule.except.path_prefixes = v; });
+  bindChipInput('f_exUAInput', 'f_exUA', () => rule.except.user_agents, v => { rule.except.user_agents = v; });
+  bindChipInput('f_exLabelsInput', 'f_exLabels', () => rule.except.labels, v => { rule.except.labels = v; });
+
+  // Collapsibles
+  document.querySelectorAll('.card .card-head').forEach(h => {
+    h.addEventListener('click', () => h.parentElement.classList.toggle('open'));
+  });
+
+  // Top buttons
+  $('btnTemplate').onclick = openTemplateModal;
+  $('btnImport').onclick = importJsonFile;
+  $('btnExport').onclick = exportJson;
+  $('btnValidate').onclick = () => { const errs = validate(rule); renderValidation(errs); if (errs.length === 0) toast('Rule valid', 'success'); else toast(`${errs.length} lỗi cần sửa`, 'error'); };
+  $('btnSave').onclick = saveRule;
+  $('btnTheme').onclick = toggleTheme;
+  $('btnCopy').onclick = copyJson;
+  $('btnEditJson').onclick = toggleEditJson;
+
+  $('modalTemplateClose').onclick = closeTemplateModal;
+  $('modalTemplate').onclick = e => { if (e.target.id === 'modalTemplate') closeTemplateModal(); };
+  $('btnBrowse').onclick = openBrowseModal;
+  $('modalBrowseClose').onclick = closeBrowseModal;
+  $('modalBrowse').onclick = e => { if (e.target.id === 'modalBrowse') closeBrowseModal(); };
+  $('browseFilter').oninput = e => filterBrowseList(e.target.value);
+
+  // Keyboard shortcut
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); saveRule(); }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); $('btnValidate').click(); }
+  });
+}
+
+/* ========================================================================
+   7. POPULATE FORM FROM STATE
+   ======================================================================== */
+
+function applyToForm() {
+  $('f_id').value = rule.id || '';
+  $('f_version').value = rule.version || '2.0';
+  $('f_enabled').checked = !!rule.enabled;
+
+  $('f_category').value = rule.info.category || 'sqli';
+  $('f_severity').value = rule.info.severity || 'medium';
+  $('f_description').value = rule.info.description || '';
+  $('f_author').value = rule.info.author || '';
+  $('f_created').value = rule.info.created || '';
+
+  // Methods chips
+  document.querySelectorAll('#f_methods .chip-btn').forEach(b => {
+    b.classList.toggle('active', rule.when.methods.includes(b.dataset.method));
+  });
+
+  $('f_minScore').value = rule.when.min_score ?? 0;
+  $('f_maxScore').value = rule.when.max_score ?? 9999;
+
+  // Logic
+  $('logicAny').classList.toggle('active', rule.detect.logic !== 'all');
+  $('logicAll').classList.toggle('active', rule.detect.logic === 'all');
+
+  $('f_score').value = rule.action.score ?? 0;
+  $('f_log').checked = !!rule.action.log;
+  $('f_block').checked = !!rule.action.block;
+  $('f_challenge').checked = !!rule.action.challenge;
+
+  $('f_mlEnabled').checked = !!rule.action.ml_confirm.enabled;
+  $('mlBox').style.display = rule.action.ml_confirm.enabled ? 'block' : 'none';
+  $('f_mlInput').value = rule.action.ml_confirm.input || 'body';
+  $('f_mlMinConf').value = rule.action.ml_confirm.min_confidence ?? 0.7;
+  $('f_mlAddAttack').value = rule.action.ml_confirm.on_attack_add ?? 0;
+  $('f_mlSubNormal').value = rule.action.ml_confirm.on_normal_subtract ?? 0;
+
+  $('f_trackEnabled').checked = !!rule.action.track.enabled;
+  $('trackBox').style.display = rule.action.track.enabled ? 'block' : 'none';
+  $('f_trackScope').value = rule.action.track.scope || 'ip';
+  $('f_trackCounter').value = rule.action.track.counter || '';
+  $('f_trackTTL').value = rule.action.track.ttl_minutes ?? 10;
+  $('f_trackThreshold').value = rule.action.track.threshold ?? 5;
+  $('f_trackScore').value = rule.action.track.on_threshold_score ?? 0;
+
+  // Chip renderers
+  renderInspect();
+  renderTransforms();
+  renderPatterns();
+
+  // Re-render chips (use refresher pattern — re-call bindChipInput render)
+  for (const [in_, list, getter] of [
+    ['f_tagInput', 'f_tags', () => rule.info.tags],
+    ['f_refInput', 'f_references', () => rule.info.references],
+    ['f_pathPrefixInput', 'f_pathPrefix', () => rule.when.path_prefix],
+    ['f_pathExcludeInput', 'f_pathExclude', () => rule.when.path_exclude],
+    ['f_requireLabelsInput', 'f_requireLabels', () => rule.when.require_labels],
+    ['f_excludeLabelsInput', 'f_excludeLabels', () => rule.when.exclude_labels],
+    ['f_labelsInput', 'f_labels', () => rule.action.labels],
+    ['f_trackLabelsInput', 'f_trackLabels', () => rule.action.track.on_threshold_labels],
+    ['f_exIpsInput', 'f_exIps', () => rule.except.ips],
+    ['f_exPathsInput', 'f_exPaths', () => rule.except.paths],
+    ['f_exPathPrefixesInput', 'f_exPathPrefixes', () => rule.except.path_prefixes],
+    ['f_exUAInput', 'f_exUA', () => rule.except.user_agents],
+    ['f_exLabelsInput', 'f_exLabels', () => rule.except.labels],
+  ]) {
+    const list_ = $(list);
+    list_.innerHTML = '';
+    for (const v of getter()) {
+      const chip = el('span', { class: 'chip-tag' }, v,
+        el('button', { type: 'button', onclick: () => {
+          // mutate underlying array
+          const arr = getter();
+          const idx = arr.indexOf(v);
+          if (idx >= 0) arr.splice(idx, 1);
+          applyToForm();
+          update();
+        } }, '×')
+      );
+      list_.appendChild(chip);
+    }
+  }
+}
+
+/* ========================================================================
+   8. JSON PREVIEW + EDIT MODE
+   ======================================================================== */
+
+function buildOutput() {
+  // Clone and prune empty optional fields for nicer JSON
+  const r = JSON.parse(JSON.stringify(rule));
+
+  // Prune info.references if empty
+  if (!r.info.references || r.info.references.length === 0) delete r.info.references;
+  if (!r.info.author) delete r.info.author;
+  if (!r.info.tags || r.info.tags.length === 0) delete r.info.tags;
+
+  // Prune when subfields if at default
+  const w = r.when;
+  if (!w.methods.length) delete w.methods;
+  if (!w.path_prefix.length) delete w.path_prefix;
+  if (!w.path_exclude.length) delete w.path_exclude;
+  if (!w.require_labels.length) delete w.require_labels;
+  if (!w.exclude_labels.length) delete w.exclude_labels;
+  if (w.min_score === 0) delete w.min_score;
+  if (w.max_score === 9999) delete w.max_score;
+  if (Object.keys(w).length === 0) delete r.when;
+
+  // Prune action
+  if (!r.action.labels.length) delete r.action.labels;
+  if (!r.action.ml_confirm.enabled) delete r.action.ml_confirm;
+  if (!r.action.track.enabled) delete r.action.track;
+  else {
+    if (!r.action.track.on_threshold_labels.length) delete r.action.track.on_threshold_labels;
+  }
+
+  // Prune except
+  const ex = r.except;
+  for (const k of Object.keys(ex)) if (Array.isArray(ex[k]) && ex[k].length === 0) delete ex[k];
+  if (Object.keys(ex).length === 0) delete r.except;
+
+  // Prune transforms if empty
+  if (!r.transforms || r.transforms.length === 0) delete r.transforms;
+
+  // Prune pattern empty flags
+  if (r.detect && r.detect.patterns) {
+    r.detect.patterns = r.detect.patterns.map(p => {
+      const o = { type: p.type, value: p.value };
+      if (p.flags) o.flags = p.flags;
+      if (p.negate) o.negate = true;
+      return o;
+    });
+  }
+
+  return r;
+}
+
+function update() {
+  if (editingJson) return; // user is editing, don't overwrite
+  const out = buildOutput();
+  const txt = JSON.stringify(out, null, 2);
+  const pre = $('jsonPreview');
+  pre.innerHTML = syntaxHighlight(txt);
+  $('jsonLines').textContent = `${txt.split('\n').length} lines · ${txt.length} chars`;
+}
+
+function toggleEditJson() {
+  const pre = $('jsonPreview');
+  if (!editingJson) {
+    editingJson = true;
+    const out = buildOutput();
+    pre.textContent = JSON.stringify(out, null, 2);
+    pre.contentEditable = 'true';
+    pre.classList.add('editable');
+    pre.focus();
+    $('btnEditJson').innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> Apply';
+    toast('Đang edit JSON — sửa xong nhấn Apply', 'info');
+  } else {
+    try {
+      const parsed = JSON.parse(pre.textContent);
+      rule = mergeWithDefault(parsed);
+      editingJson = false;
+      pre.contentEditable = 'false';
+      pre.classList.remove('editable');
+      applyToForm();
+      update();
+      $('btnEditJson').innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Edit';
+      toast('Áp dụng JSON vào form', 'success');
+    } catch (err) {
+      toast(`JSON không hợp lệ: ${err.message}`, 'error');
+    }
+  }
+}
+
+function mergeWithDefault(parsed) {
+  // Deep merge user input with default to ensure all keys exist
+  const d = DEFAULT_RULE();
+  function merge(dst, src) {
+    if (!src || typeof src !== 'object' || Array.isArray(src)) return src ?? dst;
+    const out = Array.isArray(dst) ? src : { ...dst };
+    for (const k of Object.keys(src)) {
+      if (src[k] !== null && typeof src[k] === 'object' && !Array.isArray(src[k])) {
+        out[k] = merge(dst?.[k] || {}, src[k]);
+      } else {
+        out[k] = src[k];
+      }
+    }
+    return out;
+  }
+  return merge(d, parsed);
+}
+
+/* ========================================================================
+   9. VALIDATION
+   ======================================================================== */
+
+const VALID_CATEGORIES = ['sqli','xss','lfi','rce','ssrf','xxe','nosqli','scanner','bot','ato','dos','info_leak','schema','custom'];
+const VALID_SEVERITIES = ['critical','high','medium','low','info'];
+const VALID_TRACK_SCOPES = ['ip','session','global'];
+
+function validate(r) {
+  const errs = [];
+  const warns = [];
+
+  // Identity
+  if (!r.id || !r.id.trim()) errs.push('id: bắt buộc, format WAF-<số>-<loại>-<biến thể>');
+  else if (!/^[A-Za-z0-9_-]+$/.test(r.id)) errs.push('id: chỉ cho phép chữ, số, dấu - và _');
+
+  // Info
+  if (!r.info || !r.info.category) errs.push('info.category: bắt buộc');
+  else if (!VALID_CATEGORIES.includes(r.info.category)) errs.push(`info.category "${r.info.category}" không hợp lệ`);
+  if (!r.info || !r.info.severity) errs.push('info.severity: bắt buộc');
+  else if (!VALID_SEVERITIES.includes(r.info.severity)) errs.push(`info.severity "${r.info.severity}" không hợp lệ`);
+
+  // Inspect
+  if (!Array.isArray(r.inspect) || r.inspect.length === 0) errs.push('inspect: cần ít nhất 1 source');
+  else r.inspect.forEach((s, i) => {
+    const meta = INSPECT_SOURCES.find(x => x.v === s.source);
+    if (!meta) errs.push(`inspect[${i}].source "${s.source}" không hợp lệ`);
+    else if (meta.needsName && (!s.name || !s.name.trim())) errs.push(`inspect[${i}] source="${s.source}" cần chỉ định "name"`);
+  });
+
+  // Detect
+  if (!r.detect || !Array.isArray(r.detect.patterns) || r.detect.patterns.length === 0) {
+    errs.push('detect.patterns: cần ít nhất 1 pattern');
+  } else {
+    r.detect.patterns.forEach((p, i) => {
+      if (!p.type) errs.push(`detect.patterns[${i}].type: bắt buộc`);
+      else if (!PATTERN_TYPES.find(t => t.v === p.type)) errs.push(`detect.patterns[${i}].type "${p.type}" không hợp lệ`);
+      if (p.value === '' || p.value == null) errs.push(`detect.patterns[${i}].value: bắt buộc`);
+      if (p.type === 'regex' && p.value) {
+        try { new RegExp(p.value); } catch (e) { errs.push(`detect.patterns[${i}]: regex compile lỗi — ${e.message}`); }
+      }
+      if (['entropy_gt','length_gt','length_lt'].includes(p.type) && isNaN(parseFloat(p.value))) {
+        errs.push(`detect.patterns[${i}]: type ${p.type} cần value là số`);
+      }
+    });
+  }
+  if (r.detect && r.detect.logic && !['any','all'].includes(r.detect.logic)) {
+    errs.push(`detect.logic "${r.detect.logic}" phải là "any" hoặc "all"`);
+  }
+
+  // Action
+  if (r.action) {
+    if (typeof r.action.score !== 'number' || r.action.score < 0) warns.push('action.score < 0 — rule sẽ trừ điểm khi match');
+    if (r.action.block && r.action.challenge) warns.push('action.block và action.challenge đều true — block sẽ thắng');
+    if (r.action.ml_confirm && r.action.ml_confirm.enabled) {
+      const conf = r.action.ml_confirm.min_confidence;
+      if (typeof conf !== 'number' || conf < 0 || conf > 1) errs.push('action.ml_confirm.min_confidence: phải 0..1');
+      const allowed = ['body','args','query','uri','headers_all'];
+      if (!allowed.includes(r.action.ml_confirm.input)) errs.push(`action.ml_confirm.input "${r.action.ml_confirm.input}" không hợp lệ`);
+    }
+    if (r.action.track && r.action.track.enabled) {
+      if (!VALID_TRACK_SCOPES.includes(r.action.track.scope)) errs.push(`action.track.scope "${r.action.track.scope}" không hợp lệ`);
+      if (!r.action.track.counter || !r.action.track.counter.trim()) warns.push('action.track.counter: trống — engine sẽ dùng rule ID làm counter');
+      if (r.action.track.threshold <= 0) errs.push('action.track.threshold: phải > 0');
+      if (r.action.track.ttl_minutes <= 0) errs.push('action.track.ttl_minutes: phải > 0');
+    }
+  }
+
+  // When
+  if (r.when) {
+    if (typeof r.when.min_score === 'number' && typeof r.when.max_score === 'number' && r.when.min_score >= r.when.max_score) {
+      errs.push('when.min_score phải < max_score');
+    }
+  }
+
+  // Transforms
+  if (Array.isArray(r.transforms)) {
+    for (const t of r.transforms) {
+      if (!TRANSFORMS.includes(t)) errs.push(`transforms: "${t}" không hợp lệ`);
+    }
+  }
+
+  return [...errs.map(m => ({ kind: 'err', msg: m })), ...warns.map(m => ({ kind: 'warn', msg: m }))];
+}
+
+function renderValidation(items) {
+  const wrap = $('valSummary');
+  wrap.innerHTML = '';
+  if (items.length === 0) {
+    wrap.appendChild(el('div', { class: 'val-row ok' }, el('span', { class: 'dot' }), el('span', {}, 'Rule hợp lệ — sẵn sàng save.')));
+    return;
+  }
+  for (const it of items) {
+    wrap.appendChild(el('div', { class: `val-row ${it.kind === 'err' ? 'err' : 'warn'}` },
+      el('span', { class: 'dot' }),
+      el('span', {}, it.msg),
+    ));
+  }
+}
+
+/* ========================================================================
+   10. TEMPLATES + IMPORT/EXPORT/SAVE
+   ======================================================================== */
+
+function openTemplateModal() {
+  const list = $('templateList');
+  list.innerHTML = '';
+  TEMPLATES.forEach(t => {
+    const card = el('div', { class: 'list-item', style: 'cursor:pointer', onclick: () => {
+      rule = t.rule();
+      applyToForm();
+      update();
+      closeTemplateModal();
+      toast(`Đã áp dụng template: ${t.name}`, 'success');
+    } },
+      el('div', { style: 'font-weight:600; color:var(--fg-0); font-size:13px; margin-bottom:4px' }, t.name),
+      el('div', { style: 'color:var(--fg-3); font-size:12px' }, t.desc),
+    );
+    list.appendChild(card);
+  });
+  $('modalTemplate').classList.add('open');
+}
+function closeTemplateModal() { $('modalTemplate').classList.remove('open'); }
+
+function importJsonFile() {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.json,application/json';
+  inp.onchange = () => {
+    const f = inp.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        let parsed = JSON.parse(reader.result);
+        // Support array form (file = ruleset) — take first
+        if (Array.isArray(parsed)) {
+          if (parsed.length === 0) throw new Error('File rỗng');
+          if (parsed.length > 1) toast(`File có ${parsed.length} rule, import rule đầu tiên. Các rule khác bỏ qua.`, 'info');
+          parsed = parsed[0];
+        }
+        rule = mergeWithDefault(parsed);
+        applyToForm();
+        update();
+        toast(`Đã import ${f.name}`, 'success');
+      } catch (e) {
+        toast(`Import lỗi: ${e.message}`, 'error');
+      }
+    };
+    reader.readAsText(f);
+  };
+  inp.click();
+}
+
+function exportJson() {
+  const out = buildOutput();
+  // Export như mảng để khớp format ruleset file
+  const arr = [out];
+  const blob = new Blob([JSON.stringify(arr, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const filename = (out.id || 'rule') + '.json';
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast(`Đã tải ${filename}`, 'success');
+}
+
+function copyJson() {
+  const out = buildOutput();
+  navigator.clipboard.writeText(JSON.stringify(out, null, 2)).then(
+    () => toast('Đã copy JSON vào clipboard', 'success'),
+    () => toast('Copy thất bại', 'error'),
+  );
+}
+
+async function saveRule() {
+  const items = validate(rule);
+  renderValidation(items);
+  if (items.some(i => i.kind === 'err')) {
+    toast('Có lỗi validation — sửa trước khi save', 'error');
+    return;
+  }
+  const out = buildOutput();
+  try {
+    const resp = await fetch('/waf-api/rules/save', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rule: out }),
+    });
+    const data = await resp.json();
+    if (data.success) {
+      toast(data.message || `Saved · ${data.rules_loaded || 0} rules loaded`, 'success', 4000);
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ type: 'rule-builder:saved', message: data.message, rules_loaded: data.rules_loaded }, '*');
+      }
+    } else {
+      toast(`Save lỗi: ${(data.errors && data.errors[0]) || data.message || 'unknown'}`, 'error', 6000);
+    }
+  } catch (e) {
+    toast(`Network: ${e.message}. Bạn vẫn có thể Export rồi upload từ Dashboard.`, 'error', 5000);
+  }
+}
+
+/* ========================================================================
+   12b. BROWSE EXISTING RULES (list + edit)
+   ======================================================================== */
+
+let browseAllRules = [];
+
+async function openBrowseModal() {
+  $('modalBrowse').classList.add('open');
+  const list = $('browseList');
+  list.innerHTML = '<div style="color:var(--fg-3); font-size:12px; padding:20px; text-align:center">Đang tải...</div>';
+  try {
+    const resp = await fetch('/waf-api/rules', { credentials: 'include' });
+    const data = await resp.json();
+    browseAllRules = data.rules || [];
+    $('browseStats').textContent = `${browseAllRules.length} rule trong WAF · Click vào rule để load vào builder`;
+    renderBrowseList(browseAllRules);
+  } catch (e) {
+    list.innerHTML = `<div style="color:var(--bad); font-size:13px; padding:20px">Lỗi tải rule list: ${escapeHtml(e.message)}</div>`;
+  }
+}
+function closeBrowseModal() { $('modalBrowse').classList.remove('open'); }
+
+function renderBrowseList(rules) {
+  const list = $('browseList');
+  list.innerHTML = '';
+  if (!rules.length) {
+    list.innerHTML = '<div style="color:var(--fg-3); font-size:13px; padding:20px; text-align:center">Không có rule nào.</div>';
+    return;
+  }
+  for (const r of rules) {
+    const sevColor = {
+      CRITICAL: 'var(--bad)', HIGH: '#fbbf24', MEDIUM: 'var(--accent)',
+      LOW: 'var(--fg-2)', INFO: 'var(--fg-3)',
+    }[(r.severity || '').toUpperCase()] || 'var(--fg-2)';
+
+    const card = el('div', { class: 'list-item', style: 'cursor:pointer; display:flex; align-items:center; gap:12px',
+      onclick: () => loadRuleForEdit(r.id) },
+      el('div', { style: 'flex:1; min-width:0' },
+        el('div', { style: 'display:flex; align-items:center; gap:8px; margin-bottom:4px' },
+          el('span', { class: 'mono', style: 'color:var(--accent); font-size:13px; font-weight:600' }, r.id),
+          el('span', { class: 'chip-tag', style: `color:${sevColor}` }, r.severity),
+          el('span', { class: 'chip-tag' }, r.category),
+          r.enabled ? null : el('span', { class: 'chip-tag', style: 'color:var(--fg-3)' }, 'disabled'),
+        ),
+        el('div', { style: 'color:var(--fg-2); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap' },
+          r.description || '(no description)'),
+        r.hit_count > 0 ? el('div', { style: 'color:var(--fg-3); font-size:11px; margin-top:3px' }, `hits: ${r.hit_count} · patterns: ${r.pattern_count}`) : null,
+      ),
+      el('div', { style: 'color:var(--accent); font-size:11px; font-weight:600' }, 'EDIT →'),
+    );
+    list.appendChild(card);
+  }
+}
+
+function filterBrowseList(q) {
+  q = q.toLowerCase().trim();
+  if (!q) return renderBrowseList(browseAllRules);
+  const matches = browseAllRules.filter(r => {
+    const hay = (r.id + ' ' + r.category + ' ' + (r.description || '') + ' ' + (r.tags || []).join(' ')).toLowerCase();
+    return hay.includes(q);
+  });
+  renderBrowseList(matches);
+}
+
+async function loadRuleForEdit(id) {
+  try {
+    const resp = await fetch('/waf-api/rules/get/' + encodeURIComponent(id), { credentials: 'include' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    rule = mergeWithDefault(data);
+    applyToForm();
+    update();
+    closeBrowseModal();
+    toast(`Đã load rule: ${id}`, 'success');
+  } catch (e) {
+    toast(`Load lỗi: ${e.message}`, 'error', 5000);
+  }
+}
+
+/* ========================================================================
+   11. THEME
+   ======================================================================== */
+
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('waf-theme', next);
+}
+function initTheme() {
+  const saved = localStorage.getItem('waf-theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+  else document.documentElement.setAttribute('data-theme', 'dark');
+}
+
+/* ========================================================================
+   12. INIT
+   ======================================================================== */
+
+async function init() {
+  initTheme();
+  bindAll();
+  applyToForm();
+  update();
+
+  // Auto-load rule from ?id= for inline edit (from dashboard Rules tab).
+  const params = new URLSearchParams(window.location.search);
+  const id = params.get('id');
+  if (id) {
+    try {
+      const resp = await fetch('/waf-api/rules/get/' + encodeURIComponent(id), { credentials: 'include' });
+      if (resp.ok) {
+        const data = await resp.json();
+        rule = mergeWithDefault(data);
+        applyToForm();
+        update();
+        toast(`Đang chỉnh sửa: ${id}`, 'info');
+      } else {
+        toast(`Không tìm thấy rule "${id}" (${resp.status})`, 'error', 5000);
+      }
+    } catch (e) {
+      toast(`Load rule lỗi: ${e.message}`, 'error', 5000);
+    }
+  }
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

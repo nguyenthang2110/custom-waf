@@ -2,6 +2,7 @@
 package decision
 
 import (
+	"encoding/json"
 	"strings"
 	"sync"
 	"time"
@@ -10,16 +11,68 @@ import (
 	"waf-project/internal/engine"
 )
 
-// DecisionEngine makes final decisions about request handling
+// DecisionEngine makes final decisions about request handling.
+//
+// Whitelist / blacklist entries are tracked as (ip → expires_at).
+// A zero time means "permanent" — never expires. Anything else is an
+// expiry timestamp; expired entries are filtered out of every lookup
+// and pruned by a background goroutine (Run via PruneExpired in startup).
 type DecisionEngine struct {
 	config         DecisionConfig
-	whitelistIPs   map[string]bool
-	blacklistIPs   map[string]bool
+	whitelistIPs   map[string]time.Time // value zero = permanent
+	blacklistIPs   map[string]time.Time // value zero = permanent
 	whitelistPaths map[string]bool
 	mu             sync.RWMutex
 
 	// Statistics
 	stats *DecisionStats
+}
+
+// IPListEntry is a single whitelist/blacklist record carrying an
+// optional expiry. ExpiresAt zero means permanent.
+//
+// MarshalJSON below ensures permanent entries serialize with no
+// expires_at key at all (Go's struct-tag omitempty doesn't trigger for
+// non-pointer time.Time zero values).
+type IPListEntry struct {
+	IP        string    `json:"ip"`
+	ExpiresAt time.Time `json:"-"`
+}
+
+// MarshalJSON emits {"ip":..., "expires_at":...} only when ExpiresAt is
+// non-zero; permanent entries collapse to {"ip":...} so the dashboard
+// can use a simple falsy check.
+func (e IPListEntry) MarshalJSON() ([]byte, error) {
+	if e.ExpiresAt.IsZero() {
+		return json.Marshal(struct {
+			IP string `json:"ip"`
+		}{IP: e.IP})
+	}
+	return json.Marshal(struct {
+		IP        string `json:"ip"`
+		ExpiresAt string `json:"expires_at"`
+	}{IP: e.IP, ExpiresAt: e.ExpiresAt.Format(time.RFC3339)})
+}
+
+// UnmarshalJSON accepts either v1 (no expires_at) or v2 (with expires_at)
+// payloads. Errors out only if `ip` is missing or unparseable.
+func (e *IPListEntry) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		IP        string `json:"ip"`
+		ExpiresAt string `json:"expires_at,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	e.IP = raw.IP
+	if raw.ExpiresAt != "" {
+		t, err := time.Parse(time.RFC3339, raw.ExpiresAt)
+		if err != nil {
+			return err
+		}
+		e.ExpiresAt = t
+	}
+	return nil
 }
 
 // DecisionConfig defines decision engine configuration
@@ -48,6 +101,12 @@ type DecisionConfig struct {
 	AdaptiveThreshold bool // Adjust threshold based on traffic
 	GeoBlocking       bool // Block specific countries
 	BlockedCountries  []string
+
+	// User-configurable list of path prefixes that bypass WAF inspection
+	// AND audit logging. Joined with the built-in IsRealtimePath /
+	// IsHealthCheckPath lists. Useful for noisy app-specific endpoints
+	// (heartbeats, internal polling) you want to silence at runtime.
+	BypassPathPrefixes []string
 }
 
 // DecisionStats tracks decision statistics
@@ -102,8 +161,8 @@ func NewDecisionEngine(config DecisionConfig) *DecisionEngine {
 
 	return &DecisionEngine{
 		config:         config,
-		whitelistIPs:   make(map[string]bool),
-		blacklistIPs:   make(map[string]bool),
+		whitelistIPs:   make(map[string]time.Time),
+		blacklistIPs:   make(map[string]time.Time),
 		whitelistPaths: make(map[string]bool),
 		stats:          &DecisionStats{},
 	}
@@ -334,9 +393,18 @@ func (de *DecisionEngine) selectChallengeType(score float64) string {
 	return "RATE_LIMIT" // Simple rate limit
 }
 
+// entryActive reports whether a map value (interpreted as expires_at)
+// is still in effect: zero time means permanent, anything else must be
+// strictly in the future. Used by every isWhitelisted/isBlacklisted
+// lookup so expired entries simply stop matching without needing the
+// pruner to have run yet.
+func entryActive(exp time.Time) bool {
+	return exp.IsZero() || time.Now().Before(exp)
+}
+
 // isWhitelisted checks if IP or path is whitelisted
 func (de *DecisionEngine) isWhitelisted(ip, path string) bool {
-	if de.whitelistIPs[ip] {
+	if exp, ok := de.whitelistIPs[ip]; ok && entryActive(exp) {
 		return true
 	}
 	if de.whitelistPaths[path] {
@@ -347,14 +415,25 @@ func (de *DecisionEngine) isWhitelisted(ip, path string) bool {
 
 // isBlacklisted checks if IP is blacklisted
 func (de *DecisionEngine) isBlacklisted(ip string) bool {
-	return de.blacklistIPs[ip]
+	exp, ok := de.blacklistIPs[ip]
+	return ok && entryActive(exp)
 }
 
-// AddWhitelistIP adds an IP to whitelist
+// AddWhitelistIP adds an IP to whitelist permanently (no expiry).
 func (de *DecisionEngine) AddWhitelistIP(ip string) {
+	de.AddWhitelistIPWithTTL(ip, 0)
+}
+
+// AddWhitelistIPWithTTL adds an IP to whitelist with optional TTL.
+// ttl <= 0 → permanent. ttl > 0 → expires_at = now + ttl.
+func (de *DecisionEngine) AddWhitelistIPWithTTL(ip string, ttl time.Duration) {
+	var exp time.Time
+	if ttl > 0 {
+		exp = time.Now().Add(ttl)
+	}
 	de.mu.Lock()
 	defer de.mu.Unlock()
-	de.whitelistIPs[ip] = true
+	de.whitelistIPs[ip] = exp
 }
 
 // RemoveWhitelistIP removes an IP from whitelist
@@ -364,11 +443,21 @@ func (de *DecisionEngine) RemoveWhitelistIP(ip string) {
 	delete(de.whitelistIPs, ip)
 }
 
-// AddBlacklistIP adds an IP to blacklist
+// AddBlacklistIP adds an IP to blacklist permanently (no expiry).
 func (de *DecisionEngine) AddBlacklistIP(ip string) {
+	de.AddBlacklistIPWithTTL(ip, 0)
+}
+
+// AddBlacklistIPWithTTL adds an IP to blacklist with optional TTL.
+// ttl <= 0 → permanent. ttl > 0 → expires_at = now + ttl.
+func (de *DecisionEngine) AddBlacklistIPWithTTL(ip string, ttl time.Duration) {
+	var exp time.Time
+	if ttl > 0 {
+		exp = time.Now().Add(ttl)
+	}
 	de.mu.Lock()
 	defer de.mu.Unlock()
-	de.blacklistIPs[ip] = true
+	de.blacklistIPs[ip] = exp
 }
 
 // RemoveBlacklistIP removes an IP from blacklist
@@ -376,6 +465,30 @@ func (de *DecisionEngine) RemoveBlacklistIP(ip string) {
 	de.mu.Lock()
 	defer de.mu.Unlock()
 	delete(de.blacklistIPs, ip)
+}
+
+// PruneExpiredIPs removes whitelist/blacklist entries whose expires_at
+// has passed. Returns (whitelistRemoved, blacklistRemoved) so a periodic
+// caller can log activity. Safe to call concurrently with lookups.
+func (de *DecisionEngine) PruneExpiredIPs() (int, int) {
+	now := time.Now()
+	de.mu.Lock()
+	defer de.mu.Unlock()
+	wl := 0
+	for ip, exp := range de.whitelistIPs {
+		if !exp.IsZero() && !now.Before(exp) {
+			delete(de.whitelistIPs, ip)
+			wl++
+		}
+	}
+	bl := 0
+	for ip, exp := range de.blacklistIPs {
+		if !exp.IsZero() && !now.Before(exp) {
+			delete(de.blacklistIPs, ip)
+			bl++
+		}
+	}
+	return wl, bl
 }
 
 // AddWhitelistPath adds a path to whitelist
@@ -392,28 +505,53 @@ func (de *DecisionEngine) RemoveWhitelistPath(path string) {
 	delete(de.whitelistPaths, path)
 }
 
-// GetWhitelistIPs returns all whitelisted IPs
+// GetWhitelistIPs returns all currently-active whitelisted IPs as a
+// flat string slice. Expired entries are filtered out.
 func (de *DecisionEngine) GetWhitelistIPs() []string {
-	de.mu.RLock()
-	defer de.mu.RUnlock()
-
-	ips := make([]string, 0, len(de.whitelistIPs))
-	for ip := range de.whitelistIPs {
-		ips = append(ips, ip)
-	}
-	return ips
+	return activeIPsOnly(de, de.whitelistIPs)
 }
 
-// GetBlacklistIPs returns all blacklisted IPs
+// GetBlacklistIPs returns all currently-active blacklisted IPs as a
+// flat string slice. Expired entries are filtered out.
 func (de *DecisionEngine) GetBlacklistIPs() []string {
+	return activeIPsOnly(de, de.blacklistIPs)
+}
+
+// GetWhitelistEntries returns whitelist entries with their (possibly
+// zero) expiry. Used by the dashboard to render the "expires in" column
+// alongside each IP. Expired entries are omitted from the response.
+func (de *DecisionEngine) GetWhitelistEntries() []IPListEntry {
+	return activeEntriesOnly(de, de.whitelistIPs)
+}
+
+// GetBlacklistEntries returns blacklist entries with their (possibly
+// zero) expiry. Expired entries are omitted from the response.
+func (de *DecisionEngine) GetBlacklistEntries() []IPListEntry {
+	return activeEntriesOnly(de, de.blacklistIPs)
+}
+
+func activeIPsOnly(de *DecisionEngine, m map[string]time.Time) []string {
 	de.mu.RLock()
 	defer de.mu.RUnlock()
-
-	ips := make([]string, 0, len(de.blacklistIPs))
-	for ip := range de.blacklistIPs {
-		ips = append(ips, ip)
+	out := make([]string, 0, len(m))
+	for ip, exp := range m {
+		if entryActive(exp) {
+			out = append(out, ip)
+		}
 	}
-	return ips
+	return out
+}
+
+func activeEntriesOnly(de *DecisionEngine, m map[string]time.Time) []IPListEntry {
+	de.mu.RLock()
+	defer de.mu.RUnlock()
+	out := make([]IPListEntry, 0, len(m))
+	for ip, exp := range m {
+		if entryActive(exp) {
+			out = append(out, IPListEntry{IP: ip, ExpiresAt: exp})
+		}
+	}
+	return out
 }
 
 // GetStats returns decision statistics
@@ -552,30 +690,177 @@ func (de *DecisionEngine) IsRealtimePath(path string) bool {
 	return false
 }
 
-// ShouldBypassWAF determines if request should bypass WAF entirely.
-// Bypassed requests skip rate-limit, rule evaluation, and behavior analysis.
-// Blacklisted IPs are NEVER bypassed — admin-blacklisted addresses must be
-// rejected even when targeting health/dashboard paths.
+// ShouldBypassWAF reports whether the request should skip the full
+// pipeline silently. It's a thin wrapper over BypassReason.
+//
+// Bypass means "as if the WAF wasn't there" — no rule eval, no rate limit,
+// no audit log. Reserved for paths that produce pure noise (health checks,
+// websocket polling, app-specific heartbeats). For *trusted* IPs the
+// dashboard manages an allow-list — see IsWhitelistedIP — which auto-allows
+// but still logs the request so operators can see what happened.
 func (de *DecisionEngine) ShouldBypassWAF(req *engine.ParsedRequest) bool {
+	return de.BypassReason(req) != ""
+}
+
+// BypassReason returns a short string identifying why the request should
+// skip the pipeline silently, or "" if the request should run the full
+// flow. Reasons are path-based only — IP allow-listing is handled by
+// IsWhitelistedIP (which logs).
+//
+// Returned reasons (stable — used as audit metadata keys):
+//
+//	""          — no bypass, run the full pipeline
+//	"health"    — built-in health/dashboard/api-management path
+//	"realtime"  — websocket / long-poll transport
+//	"path"      — user-configured bypass prefix
+//
+// Blacklisted IPs are NEVER bypassed; this method returns "" for them so
+// the request flows into the rule engine and gets explicitly blocked.
+func (de *DecisionEngine) BypassReason(req *engine.ParsedRequest) string {
 	if de.config.EnableBlacklist && de.isBlacklisted(req.ClientIP) {
+		return ""
+	}
+	if de.IsHealthCheckPath(req.NormalizedPath) {
+		return "health"
+	}
+	if de.IsRealtimePath(req.NormalizedPath) {
+		return "realtime"
+	}
+	if de.matchesBypassPrefix(req.NormalizedPath) {
+		return "path"
+	}
+	return ""
+}
+
+// IsWhitelistedIP reports whether the client IP is on the admin-managed
+// allow-list. Whitelisted IPs short-circuit rule + rate-limit evaluation
+// (the WAF auto-allows), but the request is still logged with decision
+// "ALLOW" so operators can see the bypass happened. Returns false when
+// whitelisting is disabled in config, even if the IP is in the map.
+//
+// Blacklist takes precedence: an IP on both lists is rejected.
+func (de *DecisionEngine) IsWhitelistedIP(ip string) bool {
+	if !de.config.EnableWhitelist {
 		return false
 	}
-
-	// Bypass health checks
-	if de.IsHealthCheckPath(req.NormalizedPath) {
-		return true
+	if de.config.EnableBlacklist && de.isBlacklisted(ip) {
+		return false
 	}
+	exp, ok := de.whitelistIPs[ip]
+	return ok && entryActive(exp)
+}
 
-	// Bypass realtime/websocket transports (no inspectable payload,
-	// pure noise for the rule engine and rate limiter).
-	if de.IsRealtimePath(req.NormalizedPath) {
-		return true
+// matchesBypassPrefix returns true when path starts with any of the
+// runtime-configurable bypass prefixes. The list is small in practice,
+// so a linear scan is cheaper than building a trie.
+func (de *DecisionEngine) matchesBypassPrefix(path string) bool {
+	prefixes := de.config.BypassPathPrefixes
+	for _, p := range prefixes {
+		if p == "" {
+			continue
+		}
+		if strings.HasPrefix(path, p) {
+			return true
+		}
 	}
-
-	// Bypass whitelisted IPs
-	if de.config.EnableWhitelist && de.whitelistIPs[req.ClientIP] {
-		return true
-	}
-
 	return false
+}
+
+// GetBypassPaths returns the user-configured bypass prefixes (excluding
+// built-in lists) — used by the API for the dashboard.
+func (de *DecisionEngine) GetBypassPaths() []string {
+	de.mu.RLock()
+	defer de.mu.RUnlock()
+	out := make([]string, 0, len(de.config.BypassPathPrefixes))
+	out = append(out, de.config.BypassPathPrefixes...)
+	return out
+}
+
+// SetBypassPaths replaces the user-configured bypass prefix list. Empty
+// strings are filtered out and entries are de-duplicated to keep the list
+// tidy when the dashboard pushes the whole array on each edit.
+func (de *DecisionEngine) SetBypassPaths(paths []string) {
+	seen := make(map[string]bool, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	de.mu.Lock()
+	de.config.BypassPathPrefixes = out
+	de.mu.Unlock()
+}
+
+// SetWhitelistIPs / SetBlacklistIPs replace the entire allow/deny set
+// with permanent entries (no TTL). Used when restoring older persisted
+// state at boot. Trims and de-duplicates so stray whitespace from the
+// dashboard doesn't corrupt the in-memory map.
+func (de *DecisionEngine) SetWhitelistIPs(ips []string) {
+	out := make(map[string]time.Time, len(ips))
+	for _, ip := range ips {
+		ip = strings.TrimSpace(ip)
+		if ip != "" {
+			out[ip] = time.Time{} // permanent
+		}
+	}
+	de.mu.Lock()
+	de.whitelistIPs = out
+	de.mu.Unlock()
+}
+
+func (de *DecisionEngine) SetBlacklistIPs(ips []string) {
+	out := make(map[string]time.Time, len(ips))
+	for _, ip := range ips {
+		ip = strings.TrimSpace(ip)
+		if ip != "" {
+			out[ip] = time.Time{} // permanent
+		}
+	}
+	de.mu.Lock()
+	de.blacklistIPs = out
+	de.mu.Unlock()
+}
+
+// SetWhitelistEntries / SetBlacklistEntries replace the entire list with
+// TTL-aware entries — used when restoring v2+ persisted state at boot.
+// Entries whose expires_at is already in the past at load time are
+// silently dropped so a stale snapshot doesn't resurrect expired blocks.
+func (de *DecisionEngine) SetWhitelistEntries(entries []IPListEntry) {
+	out := make(map[string]time.Time, len(entries))
+	now := time.Now()
+	for _, e := range entries {
+		ip := strings.TrimSpace(e.IP)
+		if ip == "" {
+			continue
+		}
+		if !e.ExpiresAt.IsZero() && !now.Before(e.ExpiresAt) {
+			continue
+		}
+		out[ip] = e.ExpiresAt
+	}
+	de.mu.Lock()
+	de.whitelistIPs = out
+	de.mu.Unlock()
+}
+
+func (de *DecisionEngine) SetBlacklistEntries(entries []IPListEntry) {
+	out := make(map[string]time.Time, len(entries))
+	now := time.Now()
+	for _, e := range entries {
+		ip := strings.TrimSpace(e.IP)
+		if ip == "" {
+			continue
+		}
+		if !e.ExpiresAt.IsZero() && !now.Before(e.ExpiresAt) {
+			continue
+		}
+		out[ip] = e.ExpiresAt
+	}
+	de.mu.Lock()
+	de.blacklistIPs = out
+	de.mu.Unlock()
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"waf-project/internal/engine"
 	"waf-project/internal/metrics"
 	"waf-project/internal/models"
+	"waf-project/internal/notifier"
 	"waf-project/internal/ratelimit"
 )
 
@@ -31,12 +33,21 @@ type APIServer struct {
 	auditLogger      *audit.Logger
 	metricsCollector *metrics.Collector
 	wafMiddleware    WAFMiddlewareInterface // For backend configuration
+	configStore      ConfigPersister        // Optional — when nil, runtime changes don't survive restart
+	notifier         *notifier.Notifier     // Optional — alert dispatch + test endpoint
 
 	// Authentication fields
 	userRepo    *models.UserRepository
 	jwtManager  *auth.JWTManager
 	bcryptCost  int
 	requireAuth bool
+}
+
+// ConfigPersister is the slice of configstore.Store that handlers need.
+// Defined as an interface to keep this package free of a concrete dep on
+// configstore (which already depends on decision/ratelimit).
+type ConfigPersister interface {
+	Save(key string, value any) error
 }
 
 // WAFMiddlewareInterface defines methods needed from WAFMiddleware
@@ -67,6 +78,18 @@ func NewAPIServer(
 // SetWAFMiddleware sets the WAF middleware reference
 func (s *APIServer) SetWAFMiddleware(waf WAFMiddlewareInterface) {
 	s.wafMiddleware = waf
+}
+
+// SetConfigStore wires the persistent config store. Calling with nil
+// disables persistence (handler updates still apply to live components).
+func (s *APIServer) SetConfigStore(p ConfigPersister) {
+	s.configStore = p
+}
+
+// SetNotifier wires the outbound alert dispatcher. Calling with nil
+// disables the /waf-api/alerts/* endpoints (they return 503).
+func (s *APIServer) SetNotifier(n *notifier.Notifier) {
+	s.notifier = n
 }
 
 // RegisterRoutes registers all API routes
@@ -101,6 +124,8 @@ func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/waf-api/rules", s.handleRules)
 	mux.HandleFunc("/waf-api/rules/stats", s.handleRuleStats)
 	mux.HandleFunc("/waf-api/rules/upload", s.requireAdmin(s.handleRuleUpload))
+	mux.HandleFunc("/waf-api/rules/save", s.requireAdmin(s.handleRuleSave))
+	mux.HandleFunc("/waf-api/rules/get/", s.handleRuleGet) // /waf-api/rules/get/<id>
 
 	// Rate limit endpoints
 	mux.HandleFunc("/waf-api/ratelimit", s.handleRateLimit)
@@ -114,6 +139,11 @@ func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
 
 	// WAF configuration — write is admin-only
 	mux.HandleFunc("/waf-api/config", s.requireAdminForWrite(s.handleConfig))
+
+	// Alerts (Slack/Email/Webhook) — read public, mutate + test are admin-only.
+	mux.HandleFunc("/waf-api/alerts/config", s.requireAdminForWrite(s.handleAlertsConfig))
+	mux.HandleFunc("/waf-api/alerts/stats", s.handleAlertsStats)
+	mux.HandleFunc("/waf-api/alerts/test", s.requireAdmin(s.handleAlertsTest))
 }
 
 // authContext holds the authenticated user identity extracted from a JWT.
@@ -123,22 +153,24 @@ type authContext struct {
 	Role     string
 }
 
-// authenticate parses the Authorization header and returns the user, or nil
-// if the request is unauthenticated. err is non-nil only when a token was
-// provided but invalid (so the caller can short-circuit with 401).
+// authenticate extracts a JWT from either the Authorization header
+// (Bearer <token>) or the `waf_token` cookie, validates it, and returns the
+// user. The cookie path is what lets browser navigations (full page loads)
+// be guarded server-side; the header path is what the dashboard's fetch()
+// calls use. Either is sufficient.
+//
+// Returns (nil, nil) for unauthenticated requests (no token anywhere) and
+// (nil, err) only when a token was supplied but failed to validate (so the
+// caller can return 401).
 func (s *APIServer) authenticate(r *http.Request) (*authContext, error) {
 	if s.jwtManager == nil {
 		return nil, nil
 	}
-	header := r.Header.Get("Authorization")
-	if header == "" {
+	tok := extractToken(r)
+	if tok == "" {
 		return nil, nil
 	}
-	parts := strings.SplitN(header, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return nil, fmt.Errorf("invalid authorization header format")
-	}
-	claims, err := s.jwtManager.ValidateToken(parts[1])
+	claims, err := s.jwtManager.ValidateToken(tok)
 	if err != nil {
 		return nil, err
 	}
@@ -147,6 +179,21 @@ func (s *APIServer) authenticate(r *http.Request) (*authContext, error) {
 		Username: claims.Username,
 		Role:     claims.Role,
 	}, nil
+}
+
+// extractToken pulls a JWT from `Authorization: Bearer <tok>` or the
+// `waf_token` cookie, whichever is present. Header wins if both supplied.
+func extractToken(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); h != "" {
+		parts := strings.SplitN(h, " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			return parts[1]
+		}
+	}
+	if c, err := r.Cookie("waf_token"); err == nil && c.Value != "" {
+		return c.Value
+	}
+	return ""
 }
 
 // requireAuthN ensures the request carries a valid JWT (any role).
@@ -193,6 +240,57 @@ func (s *APIServer) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r.WithContext(withAuth(r, user)))
 	}
+}
+
+// PageGuard returns middleware that protects management HTML pages.
+// Unauthenticated requests get a 302 redirect to /login.html?next=<original>.
+// Invalid/expired tokens clear the cookie and redirect to /login.html.
+//
+// No-op when auth is disabled globally (require_auth: false in config) or
+// the JWT manager isn't initialised (DB unavailable).
+//
+// Pages still embed the original JS-side check as a fallback for the case
+// of `require_auth: false`, but with the cookie path active the redirect is
+// authoritative server-side — users can't bypass by viewing source / curl.
+func (s *APIServer) PageGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireAuth || s.jwtManager == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		tok := extractToken(r)
+		if tok == "" {
+			redirectToLogin(w, r, "")
+			return
+		}
+		if _, err := s.jwtManager.ValidateToken(tok); err != nil {
+			// Token invalid/expired — wipe the cookie before redirecting
+			// so the browser stops re-sending it.
+			http.SetCookie(w, &http.Cookie{
+				Name: "waf_token", Value: "", Path: "/", MaxAge: -1,
+				HttpOnly: true, SameSite: http.SameSiteLaxMode,
+				Secure: r.TLS != nil,
+			})
+			redirectToLogin(w, r, "session expired")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func redirectToLogin(w http.ResponseWriter, r *http.Request, reason string) {
+	target := "/login.html"
+	q := url.Values{}
+	if r.URL.Path != "" && r.URL.Path != "/login.html" {
+		q.Set("next", r.URL.RequestURI())
+	}
+	if reason != "" {
+		q.Set("reason", reason)
+	}
+	if len(q) > 0 {
+		target += "?" + q.Encode()
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
 // requireAdminForWrite enforces admin auth only on mutating verbs (POST/PUT/PATCH/DELETE),
@@ -321,6 +419,96 @@ type LogEntry struct {
 	Categories     []string       `json:"categories"`
 	ResponseStatus int            `json:"response_status"`
 	LatencyMs      float64        `json:"latency_ms"`
+
+	// Source attribution for the dashboard. One of:
+	//   "rule"        — rule engine alone produced the verdict
+	//   "model"       — ML adjusted the score (rules didn't match)
+	//   "rule+model"  — both contributed
+	//   "-"           — clean traffic, neither path triggered
+	Source string `json:"source"`
+
+	// ML, when present, carries the verdict from /predict so the modal
+	// can show the attack class and confidence even when no rule matched.
+	ML *MLVerdictAPI `json:"ml,omitempty"`
+
+	// Headers captured from the request — Cookie / Authorization values
+	// are already redacted by the WAF middleware before they land here.
+	Headers map[string][]string `json:"headers,omitempty"`
+}
+
+// MLVerdictAPI mirrors the ml_* metadata stamped onto the audit entry by
+// the WAF middleware. Called=false means the request never reached the
+// model (rule score outside the gray zone, or ML disabled).
+type MLVerdictAPI struct {
+	Called      bool    `json:"called"`
+	Label       string  `json:"label,omitempty"`
+	Confidence  float64 `json:"confidence,omitempty"`
+	IsAttack    bool    `json:"is_attack,omitempty"`
+	ScoreAdjust float64 `json:"score_adjust,omitempty"`
+	Error       string  `json:"error,omitempty"`
+}
+
+// extractMLVerdict pulls the ml_* fields out of an audit entry's metadata
+// bag. Returns nil when the model wasn't consulted for this request.
+func extractMLVerdict(meta map[string]interface{}) *MLVerdictAPI {
+	if meta == nil {
+		return nil
+	}
+	_, hasLabel := meta["ml_label"]
+	_, hasErr := meta["ml_error"]
+	if !hasLabel && !hasErr {
+		return nil
+	}
+	v := &MLVerdictAPI{Called: true}
+	if s, ok := meta["ml_label"].(string); ok {
+		v.Label = s
+	}
+	if f, ok := meta["ml_confidence"].(float64); ok {
+		v.Confidence = f
+	}
+	if b, ok := meta["ml_is_attack"].(bool); ok {
+		v.IsAttack = b
+	}
+	if f, ok := meta["ml_score_adjust"].(float64); ok {
+		v.ScoreAdjust = f
+	}
+	if s, ok := meta["ml_error"].(string); ok {
+		v.Error = s
+	}
+	return v
+}
+
+// computeSource labels each request with whichever subsystem drove the
+// verdict. Both rule and model can contribute in the gray zone, so
+// "rule+model" is a valid third option. Whitelisted IPs skipped the full
+// pipeline — they get their own source label so operators can spot them.
+func computeSource(matchedRuleCount int, ml *MLVerdictAPI, whitelisted bool) string {
+	if whitelisted {
+		return "whitelist"
+	}
+	hasRule := matchedRuleCount > 0
+	hasML := ml != nil && ml.ScoreAdjust != 0
+	switch {
+	case hasRule && hasML:
+		return "rule+model"
+	case hasML:
+		return "model"
+	case hasRule:
+		return "rule"
+	default:
+		return "-"
+	}
+}
+
+// isWhitelistedEntry reports whether the audit entry was produced by the
+// whitelist short-circuit (the WAF middleware tags those with metadata
+// "whitelisted":true so the dashboard can label them).
+func isWhitelistedEntry(meta map[string]interface{}) bool {
+	if meta == nil {
+		return false
+	}
+	v, _ := meta["whitelisted"].(bool)
+	return v
 }
 
 func (s *APIServer) handleLogs(w http.ResponseWriter, r *http.Request) {
@@ -351,6 +539,21 @@ func (s *APIServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 	ip := r.URL.Query().Get("ip")
 	method := r.URL.Query().Get("method")
 	pathContains := r.URL.Query().Get("path_contains")
+
+	// Optional time-range filter. Accepts RFC3339 (with offset or "Z").
+	// Invalid values are silently ignored — the dashboard sends an empty
+	// string when the input is empty so we can't error on parse failure.
+	var fromT, toT time.Time
+	if v := strings.TrimSpace(r.URL.Query().Get("from")); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			fromT = t
+		}
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("to")); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			toT = t
+		}
+	}
 
 	// Get sorting parameters
 	sortBy := r.URL.Query().Get("sort_by")
@@ -383,6 +586,12 @@ func (s *APIServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 		if pathContains != "" && !strings.Contains(entry.Path, pathContains) {
 			continue
 		}
+		if !fromT.IsZero() && entry.Timestamp.Before(fromT) {
+			continue
+		}
+		if !toT.IsZero() && entry.Timestamp.After(toT) {
+			continue
+		}
 
 		// Map rule matches to API format
 		ruleMatches := make([]RuleMatchAPI, 0, len(entry.MatchedRules))
@@ -398,6 +607,7 @@ func (s *APIServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
+		mlVerdict := extractMLVerdict(entry.Metadata)
 		filteredLogs = append(filteredLogs, LogEntry{
 			Timestamp:      entry.Timestamp.Format(time.RFC3339),
 			RequestID:      entry.RequestID,
@@ -412,6 +622,9 @@ func (s *APIServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 			Categories:     entry.Categories,
 			ResponseStatus: entry.ResponseStatus,
 			LatencyMs:      entry.LatencyMs,
+			Source:         computeSource(len(ruleMatches), mlVerdict, isWhitelistedEntry(entry.Metadata)),
+			ML:             mlVerdict,
+			Headers:        entry.Headers,
 		})
 	}
 
@@ -504,17 +717,22 @@ func (s *APIServer) handleRecentLogs(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
+		mlVerdict := extractMLVerdict(entry.Metadata)
 		logs = append(logs, LogEntry{
 			Timestamp:      entry.Timestamp.Format(time.RFC3339),
 			RequestID:      entry.RequestID,
 			ClientIP:       entry.ClientIP,
 			Method:         entry.Method,
 			Path:           entry.Path,
+			Query:          entry.Query,
 			Decision:       entry.Decision,
 			TotalScore:     entry.TotalScore,
 			MatchedRules:   ruleMatches,
 			ResponseStatus: entry.ResponseStatus,
 			LatencyMs:      entry.LatencyMs,
+			Source:         computeSource(len(ruleMatches), mlVerdict, isWhitelistedEntry(entry.Metadata)),
+			ML:             mlVerdict,
+			Headers:        entry.Headers,
 		})
 	}
 
@@ -560,6 +778,18 @@ type IPInfo struct {
 	IsSuspicious    bool     `json:"is_suspicious"`
 	SuspicionScore  float64  `json:"suspicion_score"`
 	DetectedAttacks []string `json:"detected_attacks"`
+
+	// Extended fields surfaced when a row is expanded in the dashboard.
+	// All optional — empty values are fine when behavior tracking has no data
+	// for the IP (e.g. IP only appears in the metrics collector).
+	FailedAttempts      int            `json:"failed_attempts,omitempty"`
+	SuccessfulAttempts  int            `json:"successful_attempts,omitempty"`
+	UniquePathsAccessed int            `json:"unique_paths_accessed,omitempty"`
+	IsBot               bool           `json:"is_bot,omitempty"`
+	FirstSeen           string         `json:"first_seen,omitempty"`
+	BlockedUntil        string         `json:"blocked_until,omitempty"`
+	AttackCounts        map[string]int `json:"attack_counts,omitempty"`
+	Reasons             []string       `json:"reasons,omitempty"`
 }
 
 func (s *APIServer) handleIPs(w http.ResponseWriter, r *http.Request) {
@@ -572,29 +802,79 @@ func (s *APIServer) handleIPs(w http.ResponseWriter, r *http.Request) {
 		behaviorStats := s.behaviorDetector.GetIPStats(ip)
 
 		attacks := make([]string, 0)
+		attackCounts := map[string]int{}
 		suspicionScore := 0.0
 		isSuspicious := false
+		isBot := false
+		failed := 0
+		succeeded := 0
+		uniquePaths := 0
+		firstSeen := ""
+		blockedUntil := ""
 
 		if behaviorStats != nil {
 			suspicionScore = behaviorStats.SuspicionScore
 			isSuspicious = behaviorStats.IsSuspicious
-			for attack := range behaviorStats.DetectedAttacks {
+			isBot = behaviorStats.IsBot
+			failed = behaviorStats.FailedAttempts
+			succeeded = behaviorStats.SuccessfulAttempts
+			uniquePaths = behaviorStats.UniquePathsAccessed
+			if !behaviorStats.FirstSeen.IsZero() {
+				firstSeen = behaviorStats.FirstSeen.Format(time.RFC3339)
+			}
+			if !behaviorStats.BlockedUntil.IsZero() {
+				blockedUntil = behaviorStats.BlockedUntil.Format(time.RFC3339)
+			}
+			for attack, count := range behaviorStats.DetectedAttacks {
 				attacks = append(attacks, attack)
+				attackCounts[attack] = count
 			}
 		}
 
-		// Check if blocked by rate limiter
+		// IP is considered "blocked" if either:
+		//   (a) rate limiter token bucket is exhausted (tokens < 0), OR
+		//   (b) behavior detector has placed a temporary block (bruteforce
+		//       triggered → stats.isBlocked + blockedUntil > now).
+		// Without (b) the dashboard would never surface the "blocked" state
+		// because the ratelimit bucket stops at 0, not negative.
 		isBlocked := s.rateLimiter.IsClientBlocked(ip)
+		if !isBlocked && behaviorStats != nil && behaviorStats.IsBlocked &&
+			time.Now().Before(behaviorStats.BlockedUntil) {
+			isBlocked = true
+		}
 
-		ips = append(ips, IPInfo{
-			IP:              ip,
-			TotalRequests:   int(clientStat.TotalRequests),
-			BlockedRequests: int(clientStat.TotalBlocked),
-			LastSeen:        clientStat.LastSeen.Format(time.RFC3339),
+		// Build human-readable reasons explaining the current status.
+		// Order matters: most severe first so the UI can show them top-down.
+		reasons := buildIPReasons(buildIPReasonsInput{
 			IsBlocked:       isBlocked,
 			IsSuspicious:    isSuspicious,
+			IsBot:           isBot,
 			SuspicionScore:  suspicionScore,
-			DetectedAttacks: attacks,
+			FailedAttempts:  failed,
+			BlockedRequests: int(clientStat.TotalBlocked),
+			UniquePaths:     uniquePaths,
+			AttackCounts:    attackCounts,
+			BehaviorStats:   behaviorStats != nil,
+			BlockedUntil:    blockedUntil,
+		})
+
+		ips = append(ips, IPInfo{
+			IP:                  ip,
+			TotalRequests:       int(clientStat.TotalRequests),
+			BlockedRequests:     int(clientStat.TotalBlocked),
+			LastSeen:            clientStat.LastSeen.Format(time.RFC3339),
+			IsBlocked:           isBlocked,
+			IsSuspicious:        isSuspicious,
+			SuspicionScore:      suspicionScore,
+			DetectedAttacks:     attacks,
+			FailedAttempts:      failed,
+			SuccessfulAttempts:  succeeded,
+			UniquePathsAccessed: uniquePaths,
+			IsBot:               isBot,
+			FirstSeen:           firstSeen,
+			BlockedUntil:        blockedUntil,
+			AttackCounts:        attackCounts,
+			Reasons:             reasons,
 		})
 	}
 
@@ -604,6 +884,76 @@ func (s *APIServer) handleIPs(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, ips)
+}
+
+// buildIPReasonsInput bundles every signal that contributes to a "reason"
+// line on the IP detail panel — keeps the call site readable.
+type buildIPReasonsInput struct {
+	IsBlocked       bool
+	IsSuspicious    bool
+	IsBot           bool
+	SuspicionScore  float64
+	FailedAttempts  int
+	BlockedRequests int
+	UniquePaths     int
+	AttackCounts    map[string]int
+	BehaviorStats   bool
+	BlockedUntil    string
+}
+
+// buildIPReasons turns raw behavior + metrics into the short bullet list the
+// dashboard shows when a user clicks an IP row. Lines are ordered most-severe
+// first so the operator sees the headline finding without scrolling.
+func buildIPReasons(in buildIPReasonsInput) []string {
+	reasons := []string{}
+
+	if in.IsBlocked {
+		if in.BlockedUntil != "" {
+			reasons = append(reasons, fmt.Sprintf("Currently blocked (until %s)", in.BlockedUntil))
+		} else {
+			reasons = append(reasons, "Currently blocked")
+		}
+	}
+	if in.FailedAttempts > 0 {
+		reasons = append(reasons,
+			fmt.Sprintf("%d failed/blocked attempts recorded by behavior detector", in.FailedAttempts))
+	}
+	if in.BlockedRequests > 0 {
+		reasons = append(reasons,
+			fmt.Sprintf("%d request(s) blocked by WAF rules", in.BlockedRequests))
+	}
+	if len(in.AttackCounts) > 0 {
+		// Sort attack names for stable output.
+		keys := make([]string, 0, len(in.AttackCounts))
+		for k := range in.AttackCounts {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			reasons = append(reasons, fmt.Sprintf("Attack pattern: %s (×%d)", k, in.AttackCounts[k]))
+		}
+	}
+	if in.IsBot {
+		reasons = append(reasons, "Bot signature matched (User-Agent / heuristics)")
+	}
+	if in.UniquePaths > 0 && in.IsSuspicious {
+		// Only mention scanning if the suspicion actually fired — otherwise a
+		// normal client browsing many pages would look guilty here.
+		reasons = append(reasons, fmt.Sprintf("Scanned %d unique paths (possible recon)", in.UniquePaths))
+	}
+	if in.IsSuspicious && len(reasons) == 0 {
+		// Suspicion is on but we didn't surface a specific signal — fall back
+		// to the raw score so the user knows *why* it's flagged at all.
+		reasons = append(reasons, fmt.Sprintf("Suspicion score %.2f exceeds threshold", in.SuspicionScore))
+	}
+	if len(reasons) == 0 {
+		// Either behavior detector hasn't recorded this IP yet, or it has but
+		// none of the threat signals fired. Either way the operator deserves
+		// a positive confirmation rather than an empty panel.
+		reasons = append(reasons, "No threat signals detected — normal traffic")
+	}
+
+	return reasons
 }
 
 func (s *APIServer) handleBlockedIPs(w http.ResponseWriter, r *http.Request) {
@@ -761,7 +1111,7 @@ func (s *APIServer) handleRuleUpload(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	// Check file extension
-	if header.Filename[len(header.Filename)-5:] != ".json" {
+	if len(header.Filename) < 5 || header.Filename[len(header.Filename)-5:] != ".json" {
 		writeJSON(w, UploadResponse{
 			Success: false,
 			Message: "File must be a JSON file",
@@ -865,17 +1215,30 @@ func (s *APIServer) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 // ipMutationRequest is the body for POST/DELETE on whitelist/blacklist.
 // action defaults to "add" for POST and "remove" for DELETE so older clients
 // that send {"action":"remove"} on POST still work.
+//
+// TTLSeconds (optional, POST only): when > 0 the entry expires
+// `ttl_seconds` after now. When 0 or omitted the entry is permanent.
+// Negative values are clamped to 0 (permanent) — we don't surface an
+// error so the dashboard can be sloppy with form data.
 type ipMutationRequest struct {
-	IP     string `json:"ip"`
-	Action string `json:"action,omitempty"`
+	IP         string `json:"ip"`
+	Action     string `json:"action,omitempty"`
+	TTLSeconds int    `json:"ttl_seconds,omitempty"`
 }
 
 func (s *APIServer) handleWhitelist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, map[string]interface{}{"ips": s.decisionEngine.GetWhitelistIPs()})
+		writeJSON(w, map[string]interface{}{
+			"ips":     s.decisionEngine.GetWhitelistIPs(),     // legacy field — flat IP list
+			"entries": s.decisionEngine.GetWhitelistEntries(), // {ip, expires_at}
+		})
 	case http.MethodPost, http.MethodDelete:
-		s.mutateIPList(w, r, s.decisionEngine.AddWhitelistIP, s.decisionEngine.RemoveWhitelistIP)
+		s.mutateIPList(w, r,
+			s.decisionEngine.AddWhitelistIPWithTTL,
+			s.decisionEngine.RemoveWhitelistIP,
+			s.decisionEngine.GetWhitelistEntries,
+			"whitelist_ips")
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -884,9 +1247,16 @@ func (s *APIServer) handleWhitelist(w http.ResponseWriter, r *http.Request) {
 func (s *APIServer) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, map[string]interface{}{"ips": s.decisionEngine.GetBlacklistIPs()})
+		writeJSON(w, map[string]interface{}{
+			"ips":     s.decisionEngine.GetBlacklistIPs(),
+			"entries": s.decisionEngine.GetBlacklistEntries(),
+		})
 	case http.MethodPost, http.MethodDelete:
-		s.mutateIPList(w, r, s.decisionEngine.AddBlacklistIP, s.decisionEngine.RemoveBlacklistIP)
+		s.mutateIPList(w, r,
+			s.decisionEngine.AddBlacklistIPWithTTL,
+			s.decisionEngine.RemoveBlacklistIP,
+			s.decisionEngine.GetBlacklistEntries,
+			"blacklist_ips")
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -895,8 +1265,10 @@ func (s *APIServer) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 func (s *APIServer) mutateIPList(
 	w http.ResponseWriter,
 	r *http.Request,
-	add func(string),
+	add func(string, time.Duration),
 	remove func(string),
+	current func() []decision.IPListEntry,
+	persistKey string,
 ) {
 	var req ipMutationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -919,13 +1291,36 @@ func (s *APIServer) mutateIPList(
 
 	switch action {
 	case "add":
-		add(req.IP)
-		writeJSON(w, map[string]string{"status": "added", "ip": req.IP})
+		ttl := time.Duration(0)
+		if req.TTLSeconds > 0 {
+			ttl = time.Duration(req.TTLSeconds) * time.Second
+		}
+		add(req.IP, ttl)
+		s.persistIPList(persistKey, current)
+		resp := map[string]interface{}{"status": "added", "ip": req.IP}
+		if ttl > 0 {
+			resp["expires_at"] = time.Now().Add(ttl).Format(time.RFC3339)
+		}
+		writeJSON(w, resp)
 	case "remove", "delete":
 		remove(req.IP)
+		s.persistIPList(persistKey, current)
 		writeJSON(w, map[string]string{"status": "removed", "ip": req.IP})
 	default:
 		http.Error(w, "action must be add or remove", http.StatusBadRequest)
+	}
+}
+
+// persistIPList snapshots the current full allow/deny list into the
+// config store so the change survives a restart. Failure is logged via
+// the audit log but doesn't fail the request — the in-memory mutation
+// already happened.
+func (s *APIServer) persistIPList(key string, current func() []decision.IPListEntry) {
+	if s.configStore == nil {
+		return
+	}
+	if err := s.configStore.Save(key, current()); err != nil {
+		s.auditLogger.LogSystemEvent("CONFIG_PERSIST_ERROR", key+": "+err.Error())
 	}
 }
 
@@ -944,6 +1339,7 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			"decision": map[string]interface{}{
 				"block_threshold":     decisionConfig.BlockThreshold,
 				"challenge_threshold": decisionConfig.ChallengeThreshold,
+				"bypass_paths":        s.decisionEngine.GetBypassPaths(),
 			},
 			"rate_limit": map[string]interface{}{
 				"requests_per_min": rateLimitConfig.RequestsPerMin,
@@ -956,8 +1352,9 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// Update configuration
 		var req struct {
 			Decision struct {
-				BlockThreshold     float64 `json:"block_threshold"`
-				ChallengeThreshold float64 `json:"challenge_threshold"`
+				BlockThreshold     float64  `json:"block_threshold"`
+				ChallengeThreshold float64  `json:"challenge_threshold"`
+				BypassPaths        []string `json:"bypass_paths"`
 			} `json:"decision"`
 			RateLimit struct {
 				RequestsPerMin int                              `json:"requests_per_min"`
@@ -1022,6 +1419,12 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		s.decisionEngine.SetConfig(decisionConfig)
 
+		// Replace user-configured bypass prefixes whenever the field is
+		// present in the request — empty array clears the list.
+		if req.Decision.BypassPaths != nil {
+			s.decisionEngine.SetBypassPaths(req.Decision.BypassPaths)
+		}
+
 		// Update rate limiter config
 		rateLimitConfig := s.rateLimiter.GetConfig()
 		if req.RateLimit.RequestsPerMin > 0 {
@@ -1041,6 +1444,25 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				req.Decision.BlockThreshold, req.Decision.ChallengeThreshold,
 				req.RateLimit.RequestsPerMin, req.RateLimit.BurstSize))
 
+		// Persist to DB so changes survive a restart. Failure is non-fatal —
+		// the in-memory update has already been applied.
+		if s.configStore != nil {
+			if err := s.configStore.Save("decision", map[string]interface{}{
+				"block_threshold":     decisionConfig.BlockThreshold,
+				"challenge_threshold": decisionConfig.ChallengeThreshold,
+				"bypass_paths":        s.decisionEngine.GetBypassPaths(),
+			}); err != nil {
+				s.auditLogger.LogSystemEvent("CONFIG_PERSIST_ERROR", "decision: "+err.Error())
+			}
+			if err := s.configStore.Save("rate_limit", map[string]interface{}{
+				"requests_per_min": rateLimitConfig.RequestsPerMin,
+				"burst_size":       rateLimitConfig.BurstSize,
+				"endpoint_limits":  rateLimitConfig.EndpointLimits,
+			}); err != nil {
+				s.auditLogger.LogSystemEvent("CONFIG_PERSIST_ERROR", "rate_limit: "+err.Error())
+			}
+		}
+
 		writeJSON(w, map[string]interface{}{
 			"success": true,
 			"message": "Configuration updated successfully",
@@ -1048,6 +1470,7 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				"decision": map[string]interface{}{
 					"block_threshold":     decisionConfig.BlockThreshold,
 					"challenge_threshold": decisionConfig.ChallengeThreshold,
+					"bypass_paths":        s.decisionEngine.GetBypassPaths(),
 				},
 				"rate_limit": map[string]interface{}{
 					"requests_per_min": rateLimitConfig.RequestsPerMin,
@@ -1116,6 +1539,15 @@ func (s *APIServer) handleBackend(w http.ResponseWriter, r *http.Request) {
 		s.auditLogger.LogSystemEvent("CONFIG_CHANGE",
 			fmt.Sprintf("Backend URL updated to: %s", req.BackendURL))
 
+		// Persist so the backend stays put across restarts.
+		if s.configStore != nil {
+			if err := s.configStore.Save("backend", map[string]interface{}{
+				"url": req.BackendURL,
+			}); err != nil {
+				s.auditLogger.LogSystemEvent("CONFIG_PERSIST_ERROR", "backend: "+err.Error())
+			}
+		}
+
 		writeJSON(w, map[string]interface{}{
 			"success": true,
 			"message": "Backend updated successfully",
@@ -1138,4 +1570,147 @@ func writeJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
 	json.NewEncoder(w).Encode(data)
+}
+
+// ============================================================================
+// Rule single-get + single-save (used by the in-browser Rule Builder)
+// ============================================================================
+
+// handleRuleGet — GET /waf-api/rules/get/<id>
+// Returns the full Rule object as JSON (v2 schema).
+func (s *APIServer) handleRuleGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/waf-api/rules/get/")
+	id = strings.TrimSpace(id)
+	if id == "" {
+		writeJSON(w, map[string]interface{}{"error": "rule id required"})
+		return
+	}
+	data, ok := s.ruleEngine.GetRuleJSON(id)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]interface{}{"error": "rule not found", "id": id})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	_, _ = w.Write(data)
+}
+
+// handleRuleSave — POST /waf-api/rules/save
+// Body: { "rule": { <full rule JSON v2> } }
+// Adds the rule (or replaces by ID) and persists to disk.
+// Designed for the in-browser Rule Builder so each save touches only one rule
+// rather than wiping the whole ruleset (as /upload does).
+func (s *APIServer) handleRuleSave(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		Rule json.RawMessage `json:"rule"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Rule) == 0 {
+		writeJSON(w, UploadResponse{
+			Success: false,
+			Message: "Body must be {\"rule\": {...}}",
+			Errors:  []string{"invalid request body"},
+		})
+		return
+	}
+
+	// Validate the single rule by wrapping in an array.
+	wrapped := append([]byte("["), body.Rule...)
+	wrapped = append(wrapped, ']')
+	if _, err := s.ruleEngine.ValidateRulesJSON(wrapped); err != nil {
+		writeJSON(w, UploadResponse{
+			Success: false,
+			Message: "Rule validation failed",
+			Errors:  []string{err.Error()},
+		})
+		return
+	}
+
+	// Load existing rules file, replace/add by ID, write back, then hot-reload.
+	rulesPath := "configs/rules/all_rules.json"
+	existing, err := os.ReadFile(rulesPath)
+	if err != nil {
+		// Start with empty array if file missing.
+		existing = []byte("[]")
+	}
+	var existingArr []json.RawMessage
+	if err := json.Unmarshal(existing, &existingArr); err != nil {
+		writeJSON(w, UploadResponse{
+			Success: false,
+			Message: "Existing rules file is not a JSON array",
+			Errors:  []string{err.Error()},
+		})
+		return
+	}
+
+	// Find ID of the new rule.
+	var meta struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(body.Rule, &meta)
+	if meta.ID == "" {
+		writeJSON(w, UploadResponse{Success: false, Message: "rule.id is required"})
+		return
+	}
+
+	// Replace or append.
+	replaced := false
+	for i, raw := range existingArr {
+		var m struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &m); err == nil && m.ID == meta.ID {
+			existingArr[i] = body.Rule
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		existingArr = append(existingArr, body.Rule)
+	}
+
+	// Backup current file.
+	backupPath := ""
+	if len(existing) > 2 {
+		timestamp := time.Now().Format("20060102_150405")
+		backupPath = fmt.Sprintf("configs/rules/backups/all_rules_%s.json", timestamp)
+		_ = os.MkdirAll("configs/rules/backups", 0o755)
+		_ = os.WriteFile(backupPath, existing, 0o644)
+	}
+
+	out, err := json.MarshalIndent(existingArr, "", "  ")
+	if err != nil {
+		writeJSON(w, UploadResponse{Success: false, Message: "marshal failed", Errors: []string{err.Error()}})
+		return
+	}
+
+	if err := os.WriteFile(rulesPath, out, 0o644); err != nil {
+		writeJSON(w, UploadResponse{Success: false, Message: "failed to write rules file", Errors: []string{err.Error()}})
+		return
+	}
+
+	if err := s.ruleEngine.ReloadRules(out); err != nil {
+		writeJSON(w, UploadResponse{Success: false, Message: "hot-reload failed", Errors: []string{err.Error()}})
+		return
+	}
+
+	action := "added"
+	if replaced {
+		action = "updated"
+	}
+	writeJSON(w, UploadResponse{
+		Success:     true,
+		Message:     fmt.Sprintf("Rule %q %s", meta.ID, action),
+		RulesLoaded: s.ruleEngine.RuleCount(),
+		BackupPath:  backupPath,
+	})
 }

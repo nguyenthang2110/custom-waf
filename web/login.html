@@ -216,20 +216,19 @@
                 const data = await response.json();
 
                 if (response.ok && data.token) {
-                    // Save token to localStorage
+                    // Save token to localStorage (for API Bearer header)
+                    // The server also sets an HttpOnly cookie for page-level auth.
                     localStorage.setItem('waf_token', data.token);
                     localStorage.setItem('waf_user', JSON.stringify(data.user));
 
-                    // Show success message
                     successMessage.textContent = 'Login successful! Redirecting...';
                     successMessage.style.display = 'block';
 
-                    // Redirect to dashboard
+                    // Honour the ?next= query if PageGuard redirected here.
                     setTimeout(() => {
-                        window.location.href = '/dashboard';
-                    }, 1000);
+                        window.location.href = nextTarget();
+                    }, 800);
                 } else {
-                    // Show error message
                     errorMessage.textContent = data.error || 'Login failed. Please check your credentials.';
                     errorMessage.style.display = 'block';
                 }
@@ -241,12 +240,43 @@
             }
         });
 
-        // Check if already logged in
-        window.addEventListener('DOMContentLoaded', () => {
-            const token = localStorage.getItem('waf_token');
-            if (token) {
-                window.location.href = '/dashboard';
+        function nextTarget() {
+            const q = new URLSearchParams(window.location.search);
+            const next = q.get('next');
+            // Only accept same-origin relative paths to prevent open redirect.
+            if (next && next.startsWith('/') && !next.startsWith('//')) return next;
+            return '/dashboard/';
+        }
+
+        function showReason() {
+            const q = new URLSearchParams(window.location.search);
+            const reason = q.get('reason');
+            if (reason) {
+                errorMessage.textContent = reason === 'session expired'
+                    ? 'Phiên đăng nhập đã hết hạn — vui lòng đăng nhập lại.'
+                    : reason;
+                errorMessage.style.display = 'block';
             }
+        }
+
+        // Check if already logged in — verify token is still valid before
+        // redirecting. A stale localStorage token would loop forever.
+        window.addEventListener('DOMContentLoaded', async () => {
+            showReason();
+            const token = localStorage.getItem('waf_token');
+            if (!token) return;
+            try {
+                const r = await fetch('/waf-api/auth/me', {
+                    headers: { Authorization: 'Bearer ' + token }
+                });
+                if (r.ok) {
+                    window.location.href = nextTarget();
+                } else {
+                    // Token rejected — clean up so the user can log in fresh.
+                    localStorage.removeItem('waf_token');
+                    localStorage.removeItem('waf_user');
+                }
+            } catch (_) { /* network error → stay on login */ }
         });
     </script>
 </body>

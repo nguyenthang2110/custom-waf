@@ -1,8 +1,14 @@
 """
 WAF ML Inference Service
-Loads DistilBERT classifier for SQLi/XSS/CMDi/PathTraversal detection.
+Loads DistilBERT classifier for 10-class attack detection (normal/sqli/xss/cmdi/
+path_traversal/ssrf/xxe/log4shell/ssti/nosqli).
 Exposed as FastAPI HTTP endpoint, called by Go WAF when rule score is in gray zone.
+
+Labels are read dynamically from the model's `config.json` (or
+`label_config.json` if present) so a re-trained model with a different label set
+can be dropped in without code changes.
 """
+import json
 import os
 import time
 import logging
@@ -20,24 +26,52 @@ MODEL_DIR = os.environ.get("MODEL_DIR", "/app/model")
 MAX_LENGTH = int(os.environ.get("MAX_LENGTH", "256"))
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-LABELS = ["normal", "sqli", "xss", "cmdi", "path_traversal"]
+# Populated at startup from the model files.
+LABELS: List[str] = []
 
-app = FastAPI(title="WAF ML Service", version="1.0")
+app = FastAPI(title="WAF ML Service", version="2.0")
 
 tokenizer = None
 model = None
 
 
+def _load_labels(model_dir: str) -> List[str]:
+    """Read id2label from label_config.json (preferred) or config.json."""
+    for fname in ("label_config.json", "config.json"):
+        path = os.path.join(model_dir, fname)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path) as f:
+                blob = json.load(f)
+        except Exception as e:
+            log.warning(f"failed to parse {path}: {e}")
+            continue
+        id2label = blob.get("id2label")
+        if not id2label:
+            continue
+        # id2label keys are strings; sort numerically.
+        items = sorted(((int(k), v) for k, v in id2label.items()), key=lambda x: x[0])
+        return [v for _, v in items]
+    # Fallback (old 5-class model).
+    log.warning("no label config found, using legacy 5-class fallback")
+    return ["normal", "sqli", "xss", "cmdi", "path_traversal"]
+
+
 @app.on_event("startup")
 def load_model():
-    global tokenizer, model
+    global tokenizer, model, LABELS
     log.info(f"Loading model from {MODEL_DIR} on device={DEVICE}")
     t0 = time.time()
     tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR)
     model.to(DEVICE)
     model.eval()
-    log.info(f"Model loaded in {time.time() - t0:.2f}s, num_labels={model.config.num_labels}")
+    LABELS = _load_labels(MODEL_DIR)
+    log.info(
+        f"Model loaded in {time.time() - t0:.2f}s, "
+        f"num_labels={model.config.num_labels}, labels={LABELS}"
+    )
 
 
 class PredictRequest(BaseModel):

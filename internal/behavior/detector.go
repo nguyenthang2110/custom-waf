@@ -34,11 +34,6 @@ type BehaviorConfig struct {
 	MaxSessionsPerIP int
 	SessionDuration  time.Duration
 
-	// Path scanning detection
-	ScanningEnabled      bool
-	UniquePathsThreshold int           // Different paths accessed
-	ScanningWindow       time.Duration // Time window
-
 	// Velocity checks
 	VelocityEnabled      bool
 	MaxRequestsPerSecond int
@@ -107,12 +102,6 @@ func NewDetector(config BehaviorConfig) *Detector {
 	}
 	if config.MaxSessionsPerIP == 0 {
 		config.MaxSessionsPerIP = 5
-	}
-	if config.UniquePathsThreshold == 0 {
-		config.UniquePathsThreshold = 20
-	}
-	if config.ScanningWindow == 0 {
-		config.ScanningWindow = 1 * time.Minute
 	}
 	if config.MaxRequestsPerSecond == 0 {
 		config.MaxRequestsPerSecond = 10
@@ -194,10 +183,6 @@ func (d *Detector) Analyze(req *engine.ParsedRequest, evalResult *engine.Evaluat
 
 	if d.config.BotDetectionEnabled {
 		d.checkBotBehavior(stats, req, result)
-	}
-
-	if d.config.ScanningEnabled {
-		d.checkScanning(stats, result)
 	}
 
 	if d.config.VelocityEnabled {
@@ -288,36 +273,6 @@ func (d *Detector) checkBotBehavior(stats *ipStatistics, req *engine.ParsedReque
 		result.ThreatTypes = append(result.ThreatTypes, "AUTOMATED_BOT")
 		result.SuspicionScore += botScore
 		stats.isBot = true
-	}
-}
-
-// checkScanning detects path scanning/reconnaissance
-func (d *Detector) checkScanning(stats *ipStatistics, result *BehaviorResult) {
-	now := time.Now()
-
-	// Count unique paths in scanning window
-	recentPaths := 0
-	windowStart := now.Add(-d.config.ScanningWindow)
-
-	for i := len(stats.requestTimestamps) - 1; i >= 0; i-- {
-		if stats.requestTimestamps[i].After(windowStart) {
-			recentPaths++
-		} else {
-			break
-		}
-	}
-
-	// Check if accessing too many different paths
-	if len(stats.uniquePaths) > d.config.UniquePathsThreshold {
-		result.ThreatDetected = true
-		result.ThreatTypes = append(result.ThreatTypes, "PATH_SCANNING")
-		result.SuspicionScore += 0.3
-
-		if recentPaths > 30 {
-			result.RecommendAction = "BLOCK"
-		} else {
-			result.RecommendAction = "CHALLENGE"
-		}
 	}
 }
 

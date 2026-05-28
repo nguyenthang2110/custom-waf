@@ -124,7 +124,9 @@ func (l *Logger) Log(
 		return
 	}
 
-	text := Redact(BuildMLText(req, evalResult, l.maxTextLen))
+	// Canonical full-request format — matches what the inference path sends
+	// to /predict so the training jsonl ⇄ /predict text are byte-identical.
+	text := Redact(BuildCanonicalText(req, evalResult, l.maxTextLen))
 	if text == "" {
 		// Nothing to learn from — skip empty bodies on bypass paths.
 		return

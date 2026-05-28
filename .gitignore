@@ -12,6 +12,7 @@
 /test_results/
 /tmp/
 *.log
+/.ml-service.pid
 
 # Local backups created by /waf-api/rules/upload
 /configs/rules/backups/all_rules_*.json
@@ -30,3 +31,34 @@
 *.local.yaml
 .env
 .env.*
+
+# Python virtual environments & packages
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# AI/ML Model files & weights (large binaries)
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+*.h5
+*.pkl
+*.joblib
+*.pb
+*.weights
+
+# Local training artifacts, checkpoints, and datasets
+/model_v*/
+/model_zip_*/
+/train_export/
+/ml-service/model_*/
+checkpoints/
+checkpoint-*/
+runs/

@@ -23,6 +23,12 @@ type Logger struct {
 	stopRotation  chan bool
 	buffer        chan *AuditEntry
 	stats         *LoggerStats
+
+	// asyncWG tracks the asyncWriter goroutine so Close can drain the
+	// buffer deterministically instead of sleeping. Without this, a
+	// fast shutdown drops the tail end of the audit log on a busy WAF.
+	asyncWG sync.WaitGroup
+	closed  bool
 }
 
 // AuditConfig defines audit logging configuration
@@ -93,6 +99,10 @@ type AuditEntry struct {
 
 	// Additional metadata
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
+
+	// Captured request headers (Cookie / Authorization values are redacted
+	// before they get here — see middleware/waf.go::captureHeadersForAudit).
+	Headers map[string][]string `json:"headers,omitempty"`
 }
 
 // RuleMatch represents a matched rule in audit log
@@ -161,6 +171,7 @@ func NewLogger(config AuditConfig) *Logger {
 
 	// Start async writer if enabled
 	if config.AsyncWrite {
+		logger.asyncWG.Add(1)
 		go logger.asyncWriter()
 	}
 
@@ -251,8 +262,11 @@ func (l *Logger) formatTextEntry(entry *AuditEntry) string {
 	)
 }
 
-// asyncWriter processes buffered entries asynchronously
+// asyncWriter processes buffered entries asynchronously. Returns when
+// l.buffer is closed by Close — wg.Done lets shutdown wait
+// deterministically instead of sleeping.
 func (l *Logger) asyncWriter() {
+	defer l.asyncWG.Done()
 	for entry := range l.buffer {
 		l.writeEntry(entry)
 	}
@@ -459,30 +473,39 @@ func (l *Logger) Flush() {
 	}
 }
 
-// Close closes the logger and flushes remaining entries
+// Close closes the logger and flushes remaining entries. Safe to call
+// multiple times — repeat calls after the first are no-ops.
 func (l *Logger) Close() {
+	l.mu.Lock()
+	already := l.closed
+	l.closed = true
+	l.mu.Unlock()
+	if already {
+		return
+	}
+
 	// Stop rotation timer
 	if l.rotationTimer != nil {
 		l.stopRotation <- true
 	}
 
-	// Flush remaining entries
-	l.Flush()
-
-	// Close buffer channel
-	if l.config.AsyncWrite {
+	// Close buffer and wait for the async writer to fully drain
+	// instead of sleeping a fixed 100ms. On a busy WAF this is the
+	// difference between "all log lines hit disk" and "the last few
+	// thousand entries vanish silently".
+	if l.config.AsyncWrite && l.buffer != nil {
 		close(l.buffer)
-		time.Sleep(100 * time.Millisecond) // Give writer time to finish
+		l.asyncWG.Wait()
 	}
 
-	// Close file
+	// fsync after the buffer is fully drained
 	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	if l.file != nil {
-		l.file.Close()
+		_ = l.file.Sync()
+		_ = l.file.Close()
 		l.file = nil
 	}
+	l.mu.Unlock()
 }
 
 // SetLogLevel sets the log level (for future filtering)

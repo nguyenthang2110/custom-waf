@@ -143,6 +143,21 @@ func (s *APIServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Calculate expiration time
 	expiresAt := time.Now().Add(24 * time.Hour) // Should match JWT expiry
 
+	// Also set the token in an HttpOnly cookie so the browser sends it on
+	// page navigations (the JSON body keeps the token visible for the SPA's
+	// fetch() calls, which use the Bearer header). HttpOnly stops XSS from
+	// reading the cookie; Secure is auto-enabled when the request arrived
+	// over TLS so dev (HTTP) still works.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "waf_token",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteLaxMode, // Lax so login form POST + same-site navigation work
+		MaxAge:   24 * 3600,
+	})
+
 	writeJSON(w, LoginResponse{
 		Token:     token,
 		User:      user,
@@ -150,15 +165,24 @@ func (s *APIServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleLogout handles user logout
+// handleLogout handles user logout — clears the session cookie. The client
+// also removes the token from localStorage so subsequent API calls fail.
 func (s *APIServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErrorJSON(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// For JWT, logout is handled client-side by removing token
-	// Server doesn't need to do anything
+	// Expire the cookie. MaxAge -1 deletes it immediately.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "waf_token",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
 
 	writeJSON(w, map[string]interface{}{
 		"success": true,
