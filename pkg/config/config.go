@@ -40,9 +40,15 @@ type AlertsConfig struct {
 	Enabled         bool                      `yaml:"enabled"`
 	MinSeverity     string                    `yaml:"min_severity"`     // INFO/LOW/MEDIUM/HIGH/CRITICAL
 	ThrottleSeconds int                       `yaml:"throttle_seconds"` // dedup window per (ip, rule_id)
-	Slack           []AlertSlackDestination   `yaml:"slack"`
-	Email           []AlertEmailDestination   `yaml:"email"`
-	Webhook         []AlertWebhookDestination `yaml:"webhook"`
+	// Per-kind toggles — see internal/notifier.Config for the rationale.
+	// SendRequestEvents defaults to true so existing setups keep getting
+	// block/challenge alerts; SendSystemEvents defaults to false so the
+	// dashboard doesn't page someone every time an admin saves a setting.
+	SendRequestEvents bool                      `yaml:"send_request_events"`
+	SendSystemEvents  bool                      `yaml:"send_system_events"`
+	Slack             []AlertSlackDestination   `yaml:"slack"`
+	Email             []AlertEmailDestination   `yaml:"email"`
+	Webhook           []AlertWebhookDestination `yaml:"webhook"`
 }
 
 type AlertSlackDestination struct {
@@ -233,9 +239,11 @@ func Load(path string) (*Config, error) {
 			AllowedCIDRs: []string{"127.0.0.0/8", "::1/128"},
 		},
 		Alerts: AlertsConfig{
-			Enabled:         false,
-			MinSeverity:     "HIGH",
-			ThrottleSeconds: 300,
+			Enabled:           false,
+			MinSeverity:       "HIGH",
+			ThrottleSeconds:   300,
+			SendRequestEvents: true,
+			SendSystemEvents:  false,
 		},
 	}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {

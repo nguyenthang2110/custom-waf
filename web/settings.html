@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Account Settings — WAF Dashboard</title>
+    <!-- Pre-paint theme switch — same key as dashboard. -->
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('waf_theme') || 'dark';
+                document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+            } catch (_) { document.documentElement.setAttribute('data-theme', 'dark'); }
+        })();
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        /* Theme tokens — mirror index.html exactly, both modes. */
+        :root, [data-theme="dark"] {
+            --bg-0: #07080d;
+            --bg-1: #0d1018;
+            --line: rgba(148, 163, 184, 0.10);
+            --line-strong: rgba(148, 163, 184, 0.18);
+            --fg-0: #f1f5f9;
+            --fg-1: #cbd5e1;
+            --fg-2: #94a3b8;
+            --fg-3: #64748b;
+            --surface: rgba(255, 255, 255, 0.025);
+            --surface-strong: rgba(255, 255, 255, 0.04);
+            --surface-hover: rgba(255, 255, 255, 0.06);
+            --accent: #22d3ee;
+            --accent-2: #818cf8;
+            --accent-fg: #082f49;
+            --bg-radial-1: rgba(99, 102, 241, 0.12);
+            --bg-radial-2: rgba(34, 211, 238, 0.10);
+            --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 20px 60px -30px rgba(0, 0, 0, 0.6);
+        }
+        [data-theme="light"] {
+            --bg-0: #f6f8fc;
+            --bg-1: #ffffff;
+            --line: rgba(15, 23, 42, 0.08);
+            --line-strong: rgba(15, 23, 42, 0.14);
+            --fg-0: #0f172a;
+            --fg-1: #334155;
+            --fg-2: #64748b;
+            --fg-3: #94a3b8;
+            --surface: rgba(15, 23, 42, 0.025);
+            --surface-strong: rgba(15, 23, 42, 0.04);
+            --surface-hover: rgba(15, 23, 42, 0.06);
+            --accent: #0891b2;
+            --accent-2: #6366f1;
+            --accent-fg: #ffffff;
+            --bg-radial-1: rgba(99, 102, 241, 0.08);
+            --bg-radial-2: rgba(8, 145, 178, 0.06);
+            --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 12px 40px -20px rgba(15, 23, 42, 0.18);
+        }
+
+        html, body { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+        body {
+            background:
+                radial-gradient(1200px 600px at 80% -10%, var(--bg-radial-1), transparent 60%),
+                radial-gradient(900px 500px at -10% 10%, var(--bg-radial-2), transparent 55%),
+                linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 100%);
+            color: var(--fg-1);
+            min-height: 100vh;
+            transition: background-color .25s ease, color .25s ease;
+        }
+
+        .glass {
+            background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface) 40%, transparent));
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            box-shadow: var(--shadow-card);
+        }
+
+        .theme-toggle {
+            width: 36px; height: 36px;
+            border-radius: 10px;
+            display: inline-flex; align-items: center; justify-content: center;
+            background: var(--surface-strong);
+            border: 1px solid var(--line-strong);
+            color: var(--fg-1);
+            cursor: pointer;
+            transition: all .15s ease;
+        }
+        .theme-toggle:hover { background: var(--surface-hover); color: var(--accent); }
+
+        .pill-input {
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 11px 13px;
+            font-size: 14px;
+            color: var(--fg-0);
+            width: 100%;
+            outline: none;
+            transition: border-color .15s ease, box-shadow .15s ease;
+        }
+        .pill-input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12);
+        }
+        .pill-input:disabled { opacity: .65; cursor: not-allowed; }
+
+        .btn {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 10px 16px;
+            border-radius: 10px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            border: 1px solid var(--line-strong);
+            background: var(--surface);
+            color: var(--fg-0);
+            transition: transform .12s ease, background .15s ease;
+        }
+        .btn:hover { background: rgba(255, 255, 255, 0.05); }
+        .btn-primary {
+            background: linear-gradient(135deg, var(--accent-2), var(--accent));
+            color: var(--accent-fg);
+            border-color: transparent;
+        }
+        .btn-primary:hover { transform: translateY(-1px); }
+        .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+        .role-pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 3px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border: 1px solid;
+        }
+        .role-admin  { background: rgba(239, 68, 68, 0.10); color: #fca5a5; border-color: rgba(239, 68, 68, 0.35); }
+        .role-editor { background: rgba(234, 179, 8, 0.10); color: #fde68a; border-color: rgba(234, 179, 8, 0.35); }
+        .role-viewer { background: rgba(59, 130, 246, 0.10); color: #93c5fd; border-color: rgba(59, 130, 246, 0.30); }
+
+        .alert {
+            padding: 10px 14px;
+            border-radius: 10px;
+            font-size: 13px;
+            border-left: 3px solid;
+            margin-top: 12px;
+        }
+        .alert-error   { background: rgba(239, 68, 68, 0.10);  color: #fca5a5; border-color: #ef4444; }
+        .alert-success { background: rgba(34, 197, 94, 0.10);  color: #86efac; border-color: #22c55e; }
+        [data-theme="light"] .alert-error   { color: #b91c1c; }
+        [data-theme="light"] .alert-success { color: #15803d; }
+        [data-theme="light"] .role-admin    { color: #b91c1c; }
+        [data-theme="light"] .role-editor   { color: #a16207; }
+        [data-theme="light"] .role-viewer   { color: #1d4ed8; }
+    </style>
+</head>
+
+<body>
+    <header class="sticky top-0 z-30 backdrop-blur-xl" style="background: color-mix(in srgb, var(--bg-0) 70%, transparent); border-bottom: 1px solid var(--line);">
+        <div class="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-xl flex items-center justify-center"
+                     style="background: linear-gradient(135deg, #22d3ee 0%, #818cf8 100%);">
+                    <svg class="w-5 h-5 text-slate-900" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 2L4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z"/>
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4"/>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold tracking-tight" style="color: var(--fg-0);">Account Settings</h1>
+                    <p class="text-xs" style="color: var(--fg-2);">Manage your profile and credentials</p>
+                </div>
+            </div>
+            <div class="flex items-center gap-2">
+                <button id="themeToggleBtn" onclick="toggleTheme()" class="theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme"></button>
+                <a href="/dashboard/" class="btn">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+                    Back to dashboard
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-4xl mx-auto px-6 py-8 space-y-6">
+        <!-- Profile card -->
+        <section class="glass p-6">
+            <div class="flex items-center justify-between mb-5">
+                <div>
+                    <h2 class="text-base font-bold" style="color: var(--fg-0);">Profile</h2>
+                    <p class="text-xs mt-0.5" style="color: var(--fg-2);">Username and role are immutable. Only an admin can change a role.</p>
+                </div>
+                <span id="rolePill" class="role-pill role-viewer">…</span>
+            </div>
+
+            <form id="profileForm" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs font-semibold mb-1.5" style="color: var(--fg-2);">Username</label>
+                    <input id="username" class="pill-input" disabled>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold mb-1.5" style="color: var(--fg-2);">Email</label>
+                    <input id="email" type="email" class="pill-input" required>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold mb-1.5" style="color: var(--fg-2);">User ID</label>
+                    <input id="userId" class="pill-input" disabled>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold mb-1.5" style="color: var(--fg-2);">Last login</label>
+                    <input id="lastLogin" class="pill-input" disabled>
+                </div>
+                <div class="md:col-span-2 flex items-center justify-between gap-3">
+                    <div id="profileAlert"></div>
+                    <button type="submit" class="btn btn-primary">Save email</button>
+                </div>
+            </form>
+        </section>
+
+        <!-- Password card -->
+        <section class="glass p-6">
+            <div class="mb-5">
+                <h2 class="text-base font-bold" style="color: var(--fg-0);">Change password</h2>
+                <p class="text-xs mt-0.5" style="color: var(--fg-2);">Existing JWT sessions stay valid until they expire (default 24h). To revoke them instantly, log out and back in everywhere.</p>
+            </div>
+
+            <form id="passwordForm" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="md:col-span-2">
+                    <label class="block text-xs font-semibold mb-1.5" style="color: var(--fg-2);">Current password</label>
+                    <input id="oldPassword" type="password" class="pill-input" required autocomplete="current-password">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold mb-1.5" style="color: var(--fg-2);">New password (min 8 chars)</label>
+                    <input id="newPassword" type="password" class="pill-input" minlength="8" required autocomplete="new-password">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold mb-1.5" style="color: var(--fg-2);">Confirm new password</label>
+                    <input id="confirmPassword" type="password" class="pill-input" minlength="8" required autocomplete="new-password">
+                </div>
+                <div class="md:col-span-2 flex items-center justify-between gap-3">
+                    <div id="passwordAlert"></div>
+                    <button type="submit" class="btn btn-primary">Update password</button>
+                </div>
+            </form>
+        </section>
+
+        <!-- Admin shortcut -->
+        <section id="adminShortcut" class="glass p-5 hidden">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h2 class="text-sm font-bold" style="color: var(--fg-0);">User management</h2>
+                    <p class="text-xs mt-0.5" style="color: var(--fg-2);">Admin-only: list users, create accounts with chosen role, reset passwords, delete accounts.</p>
+                </div>
+                <a href="/dashboard/users.html" class="btn">Open users page →</a>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        // Theme toggle — same persistence key as the dashboard.
+        function themeIcon() {
+            const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+            return isDark
+                ? `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.36 6.36l-.71-.71M6.34 6.34l-.71-.71m12.02 0l-.71.71M6.34 17.66l-.71.71M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>`
+                : `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>`;
+        }
+        function toggleTheme() {
+            const cur = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+            const next = cur === 'light' ? 'dark' : 'light';
+            document.documentElement.setAttribute('data-theme', next);
+            try { localStorage.setItem('waf_theme', next); } catch (_) {}
+            document.getElementById('themeToggleBtn').innerHTML = themeIcon();
+        }
+        document.getElementById('themeToggleBtn').innerHTML = themeIcon();
+
+        const token = localStorage.getItem('waf_token');
+        if (!token) {
+            window.location.href = '/login.html?next=' + encodeURIComponent('/dashboard/settings.html');
+        }
+
+        const authHeaders = () => ({
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token,
+        });
+
+        function showAlert(elId, kind, msg) {
+            const el = document.getElementById(elId);
+            el.innerHTML = `<div class="alert alert-${kind}">${msg}</div>`;
+        }
+
+        function clearAlert(elId) {
+            document.getElementById(elId).innerHTML = '';
+        }
+
+        function rolePill(role) {
+            const cls = role === 'admin' ? 'role-admin' : role === 'editor' ? 'role-editor' : 'role-viewer';
+            return `<span class="role-pill ${cls}">${role}</span>`;
+        }
+
+        async function loadMe() {
+            try {
+                const r = await fetch('/waf-api/auth/me', { headers: authHeaders() });
+                if (!r.ok) {
+                    if (r.status === 401) {
+                        localStorage.removeItem('waf_token');
+                        localStorage.removeItem('waf_user');
+                        window.location.href = '/login.html?reason=session%20expired';
+                    }
+                    return;
+                }
+                const data = await r.json();
+                const u = data.user;
+                document.getElementById('username').value = u.username;
+                document.getElementById('email').value = u.email;
+                document.getElementById('userId').value = u.id;
+                document.getElementById('lastLogin').value = u.last_login ? new Date(u.last_login).toLocaleString() : '(never)';
+                const pill = document.getElementById('rolePill');
+                pill.outerHTML = `<span id="rolePill" class="role-pill ${u.role === 'admin' ? 'role-admin' : u.role === 'editor' ? 'role-editor' : 'role-viewer'}">${u.role}</span>`;
+                // Refresh cached identity so the dashboard header stays in sync.
+                localStorage.setItem('waf_user', JSON.stringify({ username: u.username, role: u.role, id: u.id }));
+                if (u.role === 'admin') {
+                    document.getElementById('adminShortcut').classList.remove('hidden');
+                }
+            } catch (e) {
+                showAlert('profileAlert', 'error', 'Failed to load profile: ' + e.message);
+            }
+        }
+
+        document.getElementById('profileForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            clearAlert('profileAlert');
+            const email = document.getElementById('email').value.trim();
+            try {
+                const r = await fetch('/waf-api/auth/me', {
+                    method: 'PUT',
+                    headers: authHeaders(),
+                    body: JSON.stringify({ email }),
+                });
+                const data = await r.json();
+                if (r.ok && data.success) {
+                    showAlert('profileAlert', 'success', 'Email updated.');
+                } else {
+                    showAlert('profileAlert', 'error', data.error || 'Update failed');
+                }
+            } catch (err) {
+                showAlert('profileAlert', 'error', 'Network error: ' + err.message);
+            }
+        });
+
+        document.getElementById('passwordForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            clearAlert('passwordAlert');
+            const oldPassword = document.getElementById('oldPassword').value;
+            const newPassword = document.getElementById('newPassword').value;
+            const confirm     = document.getElementById('confirmPassword').value;
+            if (newPassword !== confirm) {
+                showAlert('passwordAlert', 'error', 'New passwords do not match');
+                return;
+            }
+            if (newPassword.length < 8) {
+                showAlert('passwordAlert', 'error', 'New password must be at least 8 characters');
+                return;
+            }
+            try {
+                const r = await fetch('/waf-api/auth/me/password', {
+                    method: 'POST',
+                    headers: authHeaders(),
+                    body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+                });
+                const data = await r.json();
+                if (r.ok && data.success) {
+                    showAlert('passwordAlert', 'success', data.message || 'Password updated.');
+                    document.getElementById('passwordForm').reset();
+                } else {
+                    showAlert('passwordAlert', 'error', data.error || 'Update failed');
+                }
+            } catch (err) {
+                showAlert('passwordAlert', 'error', 'Network error: ' + err.message);
+            }
+        });
+
+        loadMe();
+    </script>
+</body>
+
+</html>

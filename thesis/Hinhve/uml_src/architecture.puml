@@ -1,0 +1,101 @@
+@startuml architecture
+' Biểu đồ kiến trúc tổng thể hệ thống WAF
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName "Times"
+skinparam defaultFontSize 14
+skinparam linetype ortho
+skinparam ArrowColor #333333
+skinparam ArrowThickness 1.2
+skinparam rectangle {
+  BackgroundColor #FFFFFF
+  BorderColor #555555
+  FontSize 13
+}
+skinparam component {
+  BackgroundColor #E8F0FF
+  BorderColor #4477AA
+  FontSize 13
+}
+skinparam database {
+  BackgroundColor #FFE9A8
+  BorderColor #AA8833
+  FontSize 13
+}
+skinparam queue {
+  BackgroundColor #E0F4E0
+  BorderColor #559955
+  FontSize 13
+}
+skinparam actor {
+  FontSize 13
+}
+
+actor "Client / Visitor" as client #LightGray
+
+rectangle "WAF Process (Go)" as WAF #F4F4FF {
+
+  component "HTTP Server\n+ ReverseProxy" as proxy #FFE0D0
+
+  rectangle "Middleware pipeline" as mw #F0F0FF {
+    component "Admin Access\nControl (CIDR)" as ac
+    component "Bypass Path\nFilter" as bypass
+    component "Parser /\nNormalizer" as parser
+    component "IP Check\n(black/white list)" as ipchk
+    component "Rate Limiter\n(Token Bucket)" as rl
+    component "Rule Engine\n(36 rules / 12 nhóm)" as engine
+    component "ML Hook\n(gray zone)" as mlhook
+    component "Decision Layer\n(allow/challenge/block)" as dec
+    component "Audit Log" as audit
+  }
+
+  rectangle "API & Dashboard" as api #F0F0FF {
+    component "REST API\n/waf-api/*" as rest
+    component "Embedded UI\n(go:embed)" as ui
+    component "Auth (JWT + bcrypt)\nRBAC 3 roles" as authmod
+  }
+
+  rectangle "Stores" as st #F0F0FF {
+    component "State Store\n(in-memory)" as state
+    component "Config Store" as cfg
+    component "Training Writer\n(JSONL)" as trw
+  }
+}
+
+component "ML Service\n(FastAPI + DistilBERT)" as ML #FFE0E0
+
+database "PostgreSQL\n(users, audit, ips, ...)" as PG
+
+queue "Training data\n(JSONL daily)" as TRAIN
+
+component "Upstream\nApplication" as UP #E0F4E0
+
+client --> proxy : HTTP(S)
+proxy --> ac
+ac --> bypass
+bypass --> parser
+parser --> ipchk
+ipchk --> rl
+rl --> engine
+engine --> mlhook
+mlhook --> dec
+dec --> audit
+dec --> UP : forward
+audit --> PG
+audit --> trw
+
+mlhook ..> ML : POST /predict
+ipchk ..> state
+rl ..> state
+state ..> PG : sync
+
+api --> authmod
+api --> cfg
+authmod ..> PG
+cfg ..> PG
+rest ..> engine : hot reload
+ui ..> rest
+
+trw --> TRAIN
+
+@enduml

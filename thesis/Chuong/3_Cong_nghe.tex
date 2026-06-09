@@ -1,0 +1,672 @@
+\documentclass[../DoAn.tex]{subfiles}
+\begin{document}
+
+Chương trước đã đặc tả đầy đủ các yêu cầu chức năng và phi chức năng của hệ
+thống. Để biến các đặc tả đó thành một sản phẩm vận hành được, đề tài lựa
+chọn một bộ công nghệ với tiêu chí tổng thể là \textit{hiệu năng cao trên đường
+nhanh, có khả năng tích hợp với hệ sinh thái học máy, và triển khai được trong
+môi trường mã nguồn mở khép kín}. Chương này trình bày nền tảng lý thuyết và
+đặc tính kỹ thuật của các thành phần công nghệ được lựa chọn, kèm theo lý giải
+vì sao mỗi lựa chọn phù hợp với yêu cầu đã xác định ở Chương \ref{section:2.4}.
+Các thành phần được tổ chức theo lớp kiến trúc: từ ngôn ngữ và runtime của
+WAF core (Go), đến cơ chế phát hiện (Rule Engine, DistilBERT, FastAPI), hạ
+tầng lưu trữ (PostgreSQL), lớp bảo mật nội bộ (JWT, Bcrypt, RBAC), thuật toán
+điều khiển tải (Token Bucket), và cuối cùng là môi trường đóng gói triển khai
+(Docker, Docker Compose).
+
+% ====================================================================
+\section{Go (Golang) -- Nền tảng xây dựng WAF core}
+\label{section:3.1}
+
+\subsection{Khái quát}
+\label{subsection:3.1.1}
+
+Go là ngôn ngữ lập trình biên dịch tĩnh được Google công bố năm 2009, hướng
+đến giải quyết các vấn đề thực tế phát sinh khi xây dựng phần mềm hệ thống
+quy mô lớn. Ba đặc tính cốt lõi của Go bao gồm: \textbf{(i)} mô hình đồng thời
+(concurrency model) dựa trên \textit{goroutine} -- các luồng xanh nhẹ hơn
+luồng hệ điều hành nhiều lần (mặc định stack 8 KB so với hàng MB của thread
+truyền thống), được lập lịch bởi runtime của ngôn ngữ theo mô hình M:N (M
+goroutine ánh xạ lên N thread của OS); \textbf{(ii)} cơ chế giao tiếp giữa các
+goroutine qua \textit{channel} thay vì shared memory với mutex như mô hình
+cổ điển, được tổng kết bởi phương châm ``don't communicate by sharing memory;
+share memory by communicating''; và \textbf{(iii)} thư viện chuẩn (standard
+library) phong phú và ổn định, bao gồm gói \texttt{net/http} có thể xây dựng
+máy chủ HTTP đầy đủ tính năng mà không cần bất kỳ framework bên ngoài nào.
+
+Về quản lý bộ nhớ, Go sử dụng garbage collector concurrent tri-color
+mark-and-sweep từ phiên bản 1.5, với mục tiêu duy trì thời gian dừng
+(\textit{stop-the-world pause}) dưới một mili giây ngay cả với heap kích
+thước hàng GB. Đây là đặc tính quan trọng đối với các ứng dụng yêu cầu độ
+trễ thấp và tính xác định cao như reverse proxy.
+
+\subsection{Vai trò trong hệ thống}
+\label{subsection:3.1.2}
+
+Toàn bộ WAF core trong đề tài được viết bằng Go: vòng lặp chấp nhận kết nối
+HTTP, parser request, normalizer, rule engine, các middleware (xác thực, rate
+limit, logging), bộ điều phối quyết định, và lớp adapter giao tiếp với ML
+service. Riêng phần ML inference được tách ra microservice Python (mục
+\ref{section:3.4}) để tận dụng hệ sinh thái Hugging Face -- tuy nhiên việc
+giao tiếp giữa Go và service Python được thực hiện qua HTTP với kiểu dữ liệu
+đơn giản, không tạo ràng buộc chặt giữa hai runtime.
+
+Gói \texttt{net/http} của thư viện chuẩn cung cấp interface \texttt{Handler}
+và pipeline middleware dạng chain -- chính là khung mà WAF middleware stack
+được xây dựng. Đặc biệt, \texttt{httputil.ReverseProxy} cung cấp sẵn cơ chế
+tunnel ngược cho HTTP/1.1, HTTP/2 và WebSocket, giúp đề tài không phải hiện
+thực hóa lại logic forwarding ở mức byte. Việc dispatching theo prefix path
+được thực hiện qua \texttt{http.ServeMux} với mẫu kết thúc bằng dấu ``/'' để
+khớp tiền tố -- mẫu này tương thích với phiên bản Go 1.21 mà đề tài cố định
+nhằm giảm phụ thuộc vào các tính năng mới (như pattern matching
+\texttt{\{id\}} chỉ có từ Go 1.22).
+
+\subsection{Lý do lựa chọn}
+\label{subsection:3.1.3}
+
+Việc lựa chọn Go cho lớp WAF core được dựa trên ba so sánh thực tế với các
+ứng cử viên thường gặp.
+
+So với \textbf{Python}, Go nhanh hơn về throughput I/O-bound từ 5 đến 20 lần
+trong các benchmark độc lập (TechEmpower Round 22, 2023), nhờ goroutine
+không phải chịu chi phí của Global Interpreter Lock (GIL). Hơn nữa, biên dịch
+ra binary tĩnh đơn lẻ giúp triển khai gọn nhẹ, không phụ thuộc môi trường
+Python ở máy đích -- đặc tính quan trọng cho image Docker.
+
+So với \textbf{Node.js}, Go cung cấp hiệu năng tương đương ở các workload
+I/O-bound đơn giản, nhưng vượt trội rõ rệt khi workload tính toán hỗn hợp
+(parser, regex matching, mã hóa) do mô hình đa luồng thật thay vì event loop
+đơn luồng. Việc xử lý song song nhiều request mà không phải lập trình
+asynchronous tường minh giúp mã nguồn dễ đọc và dễ kiểm thử hơn.
+
+So với \textbf{Rust}, Go thua kém về hiệu năng tuyệt đối và an toàn bộ nhớ
+ở mức compile-time, nhưng vượt trội về tốc độ phát triển và độ thân thiện
+với người mới. Rust phù hợp hơn cho các thành phần ở tầng thấp như packet
+parser ở Layer 3/4, vốn không phải phạm vi của đề tài. Đối với một reverse
+proxy ở tầng 7 với độ trễ mục tiêu vài mili giây, Go cân bằng tốt nhất giữa
+ba tiêu chí: hiệu năng đủ dùng, tốc độ phát triển nhanh, và hệ sinh thái
+phong phú.
+
+% ====================================================================
+\section{Rule Engine và OWASP CRS -- Cơ sở phát hiện dựa trên luật}
+\label{section:3.2}
+
+\subsection{Khái quát cơ chế rule-based detection}
+\label{subsection:3.2.1}
+
+Rule-based detection là mô hình phát hiện tấn công cổ điển nhất trong không
+gian WAF, dựa trên ý tưởng nền tảng: \textit{nếu một request có chứa các mẫu
+văn bản đặc trưng của một loại tấn công đã biết, thì request đó nhiều khả
+năng là tấn công}. Mô hình này được hiện thực hóa bằng tập rule -- mỗi rule
+mô tả một mẫu pattern cần kiểm tra trên một hay nhiều trường của request,
+kèm theo hành động cần thực hiện khi pattern khớp.
+
+Hệ thống đề tài kế thừa và tinh giản mô hình \textit{anomaly scoring} mà
+OWASP Core Rule Set đã đề xuất từ phiên bản 3.0. Khác với mô hình
+\textit{immediate block} (chặn ngay khi có rule khớp đầu tiên), anomaly
+scoring cho phép mỗi rule đóng góp một điểm số nhỏ vào tổng điểm nguy cơ
+của request; quyết định block chỉ được đưa ra khi điểm tổng vượt một ngưỡng
+được cấu hình. Ưu điểm chính của mô hình này là giảm false positive cho các
+trường hợp một request bình thường vô tình khớp một rule yếu (ví dụ chứa từ
+khóa SQL trong dữ liệu hợp lệ), nhưng vẫn giữ được khả năng phát hiện các
+tấn công đa pha mà mỗi pattern đơn lẻ không đủ kết luận.
+
+Một trong những thách thức cơ bản của rule-based detection là \textit{kỹ
+thuật vượt mặt} (evasion). Kẻ tấn công có thể biến tấu payload thông qua
+URL encoding nhiều lớp, thay đổi hoa thường, chèn ký tự trắng (whitespace
+padding), hay sử dụng biểu thức tương đương ngữ nghĩa nhưng khác cú pháp.
+Để chống lại các kỹ thuật này, mỗi rule được trang bị một \textit{transform
+chain} -- chuỗi các biến đổi tiền xử lý áp dụng trên text đầu vào trước khi
+so khớp pattern. Chuỗi mặc định bao gồm:
+
+\begin{itemize}[leftmargin=*]
+    \item \texttt{URL\_DECODE}: giải mã URL một lớp, chuyển \texttt{\%XX}
+    về ký tự tương ứng -- chống obfuscation cơ bản.
+    \item \texttt{LOWERCASE}: chuyển toàn bộ về chữ thường -- chống
+    case-mixing kiểu \texttt{uNiOn SeLeCt}.
+    \item \texttt{COMPRESS\_WHITESPACE}: dồn các khoảng trắng liên tiếp về
+    một ký tự duy nhất -- chống chèn ký tự trắng giữa các từ khóa.
+    \item \texttt{HTML\_ENTITY\_DECODE}: giải mã các entity HTML
+    (\texttt{\&lt;}, \texttt{\&\#x3c;}) -- quan trọng với các XSS payload.
+    \item \texttt{BASE64\_DECODE}: hỗ trợ giải mã base64 cho các nhóm rule
+    đặc thù như Log4Shell với JNDI URL được encode base64.
+\end{itemize}
+
+Đối với pattern matching, đề tài hỗ trợ hai kiểu mẫu. \textbf{REGEX pattern}
+dùng biểu thức chính quy của Go (\texttt{regexp} package, dựa trên RE2,
+không hỗ trợ backreference nhưng đảm bảo độ phức tạp tuyến tính, không bị
+catastrophic backtracking). \textbf{TOKEN pattern} dựa trên khái niệm
+\textit{proximity match}: liệt kê một dãy token và yêu cầu chúng xuất hiện
+trong văn bản theo đúng thứ tự, trong khoảng cách tối đa N ký tự. Token
+pattern thường mạnh hơn regex trong việc phát hiện các tấn công đa từ khóa
+mà thứ tự quan trọng nhưng khoảng đệm có thể thay đổi (ví dụ
+\texttt{union}\ldots\texttt{select} cách nhau bởi comment SQL).
+
+\subsection{Cấu trúc rule JSON}
+\label{subsection:3.2.2}
+
+Mỗi rule được mô tả dưới dạng một đối tượng JSON với các trường chính: định
+danh và metadata (\texttt{id}, \texttt{category}, \texttt{severity},
+\texttt{description}), điều kiện áp dụng (\texttt{conditions} -- các trường
+của request mà rule cần kiểm tra: \texttt{path}, \texttt{query},
+\texttt{headers.user-agent}, \texttt{body}, v.v.), chuỗi biến đổi tiền xử lý
+(\texttt{transforms}), danh sách pattern (\texttt{patterns} -- có thể là
+mảng các regex hoặc token sequence), thông số scoring (\texttt{anomaly\_score},
+\texttt{severity\_multiplier}), hành động (\texttt{actions} -- mặc định là
+\textit{score-only}, có thể nâng lên \textit{deny-immediate} cho các rule
+critical), và danh sách ngoại lệ (\texttt{exceptions} -- ví dụ bỏ qua đường
+dẫn \texttt{/health}, \texttt{/metrics}).
+
+Cấu trúc JSON có hai ưu điểm chính so với cú pháp ngôn ngữ chuyên dụng của
+ModSecurity (SecRule DSL). Thứ nhất, JSON là chuẩn dữ liệu phổ biến, có thể
+được sinh tự động từ công cụ và validate bằng JSON Schema. Thứ hai, việc
+nạp lại tập rule mà không cần khởi động lại proxy được thực hiện đơn giản
+qua một endpoint admin nhận file JSON, parse, validate, và hot-swap engine
+state -- hành vi mà ModSecurity vốn không hỗ trợ tốt do kiến trúc module
+nhúng vào web server.
+
+Mỗi phase của vòng đời request có thể có rule riêng. Trong phạm vi đề tài,
+chỉ phase REQUEST được hiện thực hóa -- kiểm tra request trước khi forward
+đến backend. Phase RESPONSE (kiểm tra response trước khi trả về cho client,
+phát hiện data leak hay error message) được xác định là hướng phát triển
+tương lai (mục \ref{section:6.2}).
+
+\subsection{Bộ luật 78 rules / 13 nhóm}
+\label{subsection:3.2.3}
+
+Đề tài xây dựng tập luật gồm 78 rule chia thành 13 nhóm tấn công, bao phủ
+hầu hết các nhóm trong OWASP Top 10 2021 và các nhóm tấn công thường gặp
+ngoài Top 10. Tập luật gồm hai tầng: khoảng 45 \textit{chữ ký} (signature)
+bắt mẫu tấn công hoàn chỉnh và 33 \textit{dấu hiệu} (indicator) là các tín
+hiệu yếu cộng dồn theo mô hình anomaly scoring. Bảng \ref{table:rule-groups}
+liệt kê các nhóm và số lượng rule trong mỗi nhóm. Danh sách chi tiết của 78
+rule cùng pattern chính được trình bày ở Phụ lục B.
+
+\begin{table}[h!]
+\centering
+\caption{Phân bố 78 rule theo 13 nhóm tấn công}
+\label{table:rule-groups}
+\small
+\begin{tabular}{|l|c|p{6.5cm}|}
+\hline
+\textbf{Nhóm tấn công} & \textbf{Số rule} & \textbf{Đại diện pattern} \\
+\hline
+SQL Injection (SQLi) & 13 & UNION SELECT, OR 1=1, time-based sleep/benchmark, error-based extractvalue \\
+\hline
+Cross-Site Scripting (XSS) & 12 & \texttt{<script>}, event handler \texttt{onerror=}, \texttt{javascript:}/\texttt{data:} URI, iframe/svg \\
+\hline
+Remote Code Execution / CMDi & 16 & Shell metachar \texttt{; | \&\& \$()}, wget/curl/nc, PHP \texttt{system()}/\texttt{exec()}, reverse shell, JNDI \\
+\hline
+Path Traversal / LFI & 10 & \texttt{../}, biến thể mã hóa, \texttt{/etc/passwd}, \texttt{php://} wrapper, null byte \\
+\hline
+Server-Side Request Forgery (SSRF) & 6 & Dải IP nội bộ, \texttt{169.254.169.254}, \texttt{file://}, \texttt{gopher://} \\
+\hline
+XML External Entity (XXE) & 2 & \texttt{<!ENTITY}, SYSTEM, parameter entity \\
+\hline
+NoSQL Injection & 2 & Toán tử Mongo \texttt{\$where}, \texttt{\$ne}, \texttt{\$gt}, \texttt{\$regex} \\
+\hline
+Information Leak & 5 & Dotfiles/\texttt{.git}, file backup \texttt{.bak}/\texttt{.old}, file cấu hình, CRLF header injection \\
+\hline
+Scanner Detection & 4 & Scanner User-Agent (Nikto, sqlmap), probe path \texttt{.env}/\texttt{wp-admin} \\
+\hline
+Account Takeover (ATO) & 2 & Brute-force \texttt{/login}, lạm dụng password-reset \\
+\hline
+Bot / Automation & 1 & Thiếu \texttt{Accept-Language} (heuristic) \\
+\hline
+Denial of Service (DoS) & 1 & Cụm header quá khổ \\
+\hline
+Custom / Heuristic & 4 & Null byte, over-encoding, hex obfuscation, template injection (SSTI) \\
+\hline
+\end{tabular}
+\end{table}
+
+Cách xây dựng tập rule đi qua ba bước. Thứ nhất, lựa chọn các nhóm tấn
+công có tần suất xuất hiện cao nhất trong các báo cáo bảo mật ứng dụng web
+giai đoạn 2021--2024 (OWASP Top 10 2021, Verizon DBIR 2023, các CVE nổi
+bật như Log4Shell). Thứ hai, với mỗi nhóm, khảo sát các pattern điển hình
+từ OWASP CRS, từ payload list công khai (PayloadAllTheThings, SecLists),
+và từ các sample tấn công đã được công bố. Thứ ba, viết và kiểm thử pattern
+trên tập 42 OWASP attack payload đã biết, hiệu chỉnh transform chain và
+proximity threshold cho đến khi đạt block rate \(\ge\) 95\%.
+
+% ====================================================================
+\section{DistilBERT -- Mô hình phân loại tấn công}
+\label{section:3.3}
+
+\subsection{Khái quát kiến trúc Transformer và BERT}
+\label{subsection:3.3.1}
+
+DistilBERT là một biến thể nhẹ của BERT, vốn là kiến trúc tiêu chuẩn cho
+nhiều bài toán xử lý ngôn ngữ tự nhiên kể từ năm 2018. Để hiểu DistilBERT,
+cần đi qua hai nền tảng tiền đề là kiến trúc Transformer và BERT.
+
+\textbf{Transformer} (Vaswani và cộng sự, 2017) là kiến trúc mạng nơ-ron
+được đề xuất ban đầu cho bài toán dịch máy, dựa hoàn toàn vào cơ chế
+\textit{self-attention} thay vì các cell hồi quy (RNN/LSTM) hay convolution.
+Cơ chế self-attention cho phép mỗi vị trí trong chuỗi đầu vào ``chú ý'' đến
+mọi vị trí khác cùng một lúc, với trọng số được tính theo công thức
+\(\text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V\) trong đó \(Q\),
+\(K\), \(V\) là các ma trận query, key, value được tính từ chính chuỗi đầu
+vào. Lợi thế của Transformer so với RNN nằm ở khả năng song song hóa hoàn
+toàn quá trình tính toán cho mọi vị trí trong chuỗi, tận dụng tốt phần cứng
+GPU/TPU hiện đại.
+
+\textbf{BERT} (Devlin và cộng sự, 2018) là mô hình tiền huấn luyện
+(pre-trained) dựa trên kiến trúc Transformer encoder hai chiều, gồm hai
+nhiệm vụ tiền huấn luyện: \textit{Masked Language Modeling} (MLM -- dự đoán
+các token bị che ngẫu nhiên trong văn bản) và \textit{Next Sentence
+Prediction} (NSP -- dự đoán hai câu có liên tiếp hay không). Sau khi tiền
+huấn luyện trên tập văn bản khổng lồ (Wikipedia + BookCorpus, khoảng 3.3 tỷ
+từ), BERT có thể được fine-tune cho các nhiệm vụ downstream như phân loại
+câu, gán nhãn token, hỏi đáp, với chi phí và lượng dữ liệu nhỏ hơn nhiều
+so với huấn luyện từ đầu.
+
+\textbf{DistilBERT} (Sanh và cộng sự, 2019) là phiên bản chắt lọc (distilled)
+của BERT-base thông qua kỹ thuật \textit{knowledge distillation}: huấn
+luyện một mô hình ``học sinh'' (student, kiến trúc đơn giản hơn) học cách
+khớp với phân phối xác suất đầu ra của mô hình ``giáo viên'' (teacher, ở
+đây là BERT-base). Kết quả là DistilBERT có 6 lớp encoder thay vì 12 (giảm
+40\% số tham số xuống còn 66 triệu), nhanh hơn 60\% ở thời gian inference,
+nhưng vẫn giữ được khoảng 97\% hiệu suất của BERT-base trên benchmark GLUE.
+Đây chính là đặc tính khiến DistilBERT phù hợp với bài toán phân loại
+real-time của WAF, nơi mỗi mili giây độ trễ đều ảnh hưởng đến trải nghiệm
+người dùng cuối.
+
+\subsection{Fine-tuning cho bài toán phân loại HTTP request}
+\label{subsection:3.3.2}
+
+Bài toán mà DistilBERT đảm nhận trong đề tài là \textit{sequence
+classification} với 10 lớp: \texttt{normal} (không phải tấn công) và 9
+lớp tấn công tương ứng với các nhóm chính (\texttt{sqli}, \texttt{xss},
+\texttt{cmdi}, \texttt{path\_traversal}, \texttt{ssrf}, \texttt{xxe},
+\texttt{log4shell}, \texttt{ssti}, \texttt{nosqli}). Trong giai đoạn
+suy luận (inference), output cuối được giảm về phân loại nhị phân
+(attack/normal) bằng cách gộp 9 nhãn tấn công thành một lớp -- phù hợp với
+nhu cầu sử dụng của engine.
+
+\textbf{Tiền xử lý đầu vào -- canonical text}: Đầu vào của mô hình là một
+biểu diễn văn bản chuẩn hóa của HTTP request, gọi là \textit{canonical
+text}. Đặc tả của canonical text được thống nhất giữa Go (hàm
+\texttt{BuildCanonicalText} trong WAF core) và Python (hàm
+\texttt{canonical\_compose} trong ML service) và phải tạo ra cùng một
+chuỗi byte cho cùng một request -- đây là ràng buộc cứng được kiểm tra
+bằng 7 fixture test case xuyên hai ngôn ngữ. Định dạng tổng quát:
+\texttt{METHOD PATH\textbackslash nHost: ...\textbackslash nUser-Agent:
+...\textbackslash n\textbackslash nBODY}, với các quy tắc cụ thể: URL-decode
+một lớp đối với path và query, giới hạn mỗi header value ở 256 ký tự, sắp
+xếp header theo thứ tự alphabetic để đảm bảo tính xác định.
+
+\textbf{Pipeline fine-tuning}: Đề tài fine-tune từ checkpoint
+\texttt{distilbert-base-uncased} với các tham số: optimizer AdamW, learning
+rate \(2 \times 10^{-5}\), batch size 32, max sequence length 512 token,
+số epoch tối đa 6 với early stopping theo validation F1. Loss function là
+cross-entropy với class weights tỷ lệ nghịch với tần suất lớp để bù trừ
+mất cân bằng dữ liệu. Dữ liệu huấn luyện được kiểm soát theo phiên bản:
+v5 (baseline), v6 (fail report -- không đạt hard gate), v6.1 (kế hoạch
+augmentation 1800 mẫu có mục tiêu).
+
+\textbf{Hard gate kiểm soát chất lượng}: Đề tài áp đặt một bộ tiêu chí
+cứng mà mô hình phải vượt qua trước khi được ship lên production: overall
+accuracy \(\ge\) 0.92, cmdi F1 \(\ge\) 0.85, log4shell F1 \(\ge\) 0.90. Mô
+hình không đạt gate sẽ không được tích hợp -- ví dụ v6 đã fail với accuracy
+0.8866, dẫn đến quyết định giữ v5 trong production và lập kế hoạch v6.1.
+Chi tiết của cơ chế hard gate được trình bày ở Chương \ref{section:5.3}.
+
+\subsection{Lý do lựa chọn}
+\label{subsection:3.3.3}
+
+So với các kiến trúc khác có thể dùng cho cùng bài toán, DistilBERT cân
+bằng tốt nhất giữa độ chính xác và tốc độ.
+
+So với \textbf{LSTM hoặc CNN-text}, DistilBERT hưởng lợi từ tiền huấn luyện
+trên kho ngữ liệu khổng lồ -- một lợi thế quan trọng khi dữ liệu HTTP request
+có nhãn không đủ phong phú để huấn luyện một mô hình hoàn toàn từ đầu. Các
+mẫu hình của BERT về cấu trúc ngữ pháp và mối quan hệ ngữ nghĩa đã được
+học sẵn, fine-tuning chỉ phải điều chỉnh các phân biệt tinh tế giữa các
+nhãn tấn công.
+
+So với \textbf{BERT-base hoặc RoBERTa}, DistilBERT hi sinh khoảng 3\% accuracy
+để đổi lấy gấp đôi tốc độ inference -- một đánh đổi mà đề tài chấp nhận
+được, vì ML chỉ được gọi trong vùng xám (khoảng 5--10\% lưu lượng) và
+timeout cứng 800 mili giây bao trùm tất cả các bước HTTP, tokenization, và
+forward pass. Trên phần cứng CPU phổ thông (Intel i5 thế hệ 10), latency
+inference của DistilBERT trung bình 60--80 mili giây cho một sequence ngắn,
+phù hợp với budget thời gian.
+
+So với các mô hình hệ thống học truyền thống như \textbf{Random Forest hay
+SVM trên TF-IDF features}, DistilBERT vượt trội rõ rệt khi xử lý các biến
+thể đối nghịch (adversarial variants) nhờ khả năng nắm bắt ngữ cảnh, không
+phụ thuộc vào việc liệt kê các n-gram đặc trưng -- vốn dễ bị đánh lừa qua
+character-level transformations.
+
+% ====================================================================
+\section{FastAPI và Python -- ML Inference Service}
+\label{section:3.4}
+
+\subsection{Khái quát}
+\label{subsection:3.4.1}
+
+FastAPI là framework xây dựng API HTTP cho Python được phát triển từ năm
+2018, dựa trên ba thành phần nền tảng: \textbf{Starlette} (ASGI toolkit),
+\textbf{Pydantic} (kiểm tra và validate dữ liệu qua type hint), và
+\textbf{Uvicorn} (ASGI server hiệu năng cao dựa trên uvloop và httptools).
+Đặc điểm nổi bật của FastAPI bao gồm: tự động sinh tài liệu OpenAPI (Swagger
+UI) từ type hint, tích hợp sẵn async/await cho I/O concurrency, và hiệu
+năng cao hơn các framework cổ điển Flask/Django đáng kể (ở mức gần ngang
+với Node.js Express trong các benchmark độc lập).
+
+\subsection{Vai trò trong hệ thống}
+\label{subsection:3.4.2}
+
+ML Inference Service đóng vai trò microservice chuyên trách suy luận, được
+viết bằng Python để tận dụng hệ sinh thái Hugging Face (transformers,
+tokenizers) và PyTorch -- hai gói không có tương đương trưởng thành trong
+hệ sinh thái Go. Service cung cấp hai endpoint chính: \texttt{POST /predict}
+nhận một canonical text và trả về \texttt{(label, confidence)}; và
+\texttt{POST /predict\_batch} nhận một mảng canonical text và trả về mảng
+kết quả tương ứng -- được sử dụng cho mục đích đánh giá hàng loạt.
+
+Khi khởi động, service nạp checkpoint model từ thư mục local
+(\texttt{model\_v5/}, \texttt{model\_v6/}), chuyển sang chế độ \texttt{eval}
+của PyTorch, và (khi cấu hình) bật chế độ inference no-grad để giảm tiêu
+thụ bộ nhớ. Trên CPU, một worker đơn xử lý tuần tự các request đến; khi cần
+mở rộng, có thể tăng số worker Uvicorn hoặc chạy nhiều instance phía sau
+một load balancer.
+
+Việc tách ML thành service riêng có ba lợi ích cụ thể: \textbf{(i)} cách
+ly môi trường runtime, không trộn lẫn binary Go với phụ thuộc Python; \textbf{(ii)}
+có thể nâng cấp hoặc thay thế mô hình (đổi từ DistilBERT sang một mô hình
+khác) mà không cần biên dịch lại WAF core; và \textbf{(iii)} cho phép chia
+sẻ service ML giữa nhiều instance WAF trong tương lai, tận dụng cache và
+warm-up của mô hình.
+
+% ====================================================================
+\section{PostgreSQL -- Lưu trữ logs, users, cấu hình}
+\label{section:3.5}
+
+\subsection{Khái quát}
+\label{subsection:3.5.1}
+
+PostgreSQL là hệ quản trị cơ sở dữ liệu quan hệ mã nguồn mở, phát triển
+liên tục từ năm 1996, được biết đến với độ tuân thủ chuẩn SQL cao, hỗ trợ
+phong phú các kiểu dữ liệu (JSON, JSONB, mảng, range, network), và khả
+năng mở rộng qua extension (PostGIS, pg\_trgm, TimescaleDB). Phiên bản đề
+tài sử dụng là PostgreSQL 15, hỗ trợ đầy đủ \texttt{CHECK constraint},
+\texttt{GENERATED column}, và partitioning theo timestamp -- ba tính năng
+hữu ích cho schema của đề tài.
+
+\subsection{Vai trò trong hệ thống}
+\label{subsection:3.5.2}
+
+PostgreSQL đảm nhận ba trách nhiệm chính: \textbf{(i)} lưu trữ tài khoản
+người dùng nội bộ (bảng \texttt{users}), \textbf{(ii)} ghi nhật ký kiểm
+toán (bảng \texttt{audit\_logs}), và \textbf{(iii)} lưu trữ động các danh
+sách IP (bảng \texttt{ip\_lists}). Cấu hình WAF cốt lõi (ngưỡng, URL backend)
+được lưu trong tệp \texttt{config.yaml} thay vì database để giảm phụ thuộc
+khởi động.
+
+Việc lựa chọn PostgreSQL thay vì các SQL khác (MySQL, SQLite) hay NoSQL
+(MongoDB) dựa trên hai cân nhắc. Thứ nhất, dữ liệu audit log có tính chất
+quan hệ rõ ràng và yêu cầu truy vấn lọc/sắp xếp/aggregate phức tạp (theo
+thời gian, IP, ruleID, kiểu tấn công) -- phù hợp với mô hình quan hệ và
+chỉ mục B-tree truyền thống. Thứ hai, hỗ trợ \texttt{CHECK constraint} và
+\texttt{UNIQUE} ràng buộc ở mức schema là cốt lõi của chính sách bảo mật
+nội bộ (chống nhập role bất hợp lệ, chống trùng username/email -- mục
+\ref{subsection:2.2.8}).
+
+\subsection{Schema chính}
+\label{subsection:3.5.3}
+
+\textbf{Bảng \texttt{users}} lưu thông tin tài khoản nội bộ. Các cột:
+\texttt{id} (\texttt{SERIAL PRIMARY KEY}), \texttt{username}
+(\texttt{VARCHAR UNIQUE NOT NULL}), \texttt{email} (\texttt{VARCHAR UNIQUE}),
+\texttt{password\_hash} (\texttt{VARCHAR NOT NULL} -- bcrypt hash, mục
+\ref{section:3.6}), \texttt{role} (\texttt{VARCHAR CHECK (role IN ('admin',
+'editor', 'viewer'))}), \texttt{created\_at}, \texttt{updated\_at}.
+
+\textbf{Bảng \texttt{audit\_logs}} lưu mỗi bản ghi kiểm toán. Các cột chính:
+\texttt{id}, \texttt{timestamp} (có index), \texttt{ip}, \texttt{method},
+\texttt{path}, \texttt{score}, \texttt{decision} (ENUM \texttt{ALLOW}/\texttt{LOG}/\texttt{CHALLENGE}/\texttt{BLOCK}),
+\texttt{rule\_ids} (\texttt{INTEGER[]}), \texttt{ml\_label}, \texttt{ml\_confidence},
+\texttt{actor\_id} (\texttt{NULLABLE}, tham chiếu \texttt{users.id} cho các
+sự kiện hệ thống), \texttt{event\_type} (request hoặc system).
+
+\textbf{Bảng \texttt{ip\_lists}} lưu các IP/CIDR thuộc blacklist hoặc
+whitelist. Các cột: \texttt{id}, \texttt{ip\_or\_cidr}, \texttt{list\_type}
+(\texttt{CHECK IN ('blacklist','whitelist')}), \texttt{expires\_at}
+(\texttt{NULLABLE} -- hỗ trợ TTL tự động hết hạn), \texttt{reason}.
+
+% ====================================================================
+\section{JWT và Bcrypt -- Xác thực và bảo mật}
+\label{section:3.6}
+
+\subsection{JWT: xác thực không trạng thái với dual-mode delivery}
+\label{subsection:3.6.1}
+
+JSON Web Token (JWT) là chuẩn được mô tả trong RFC 7519, dùng để truyền
+khẳng định (claim) giữa các bên dưới dạng một chuỗi ba phần
+\texttt{header.payload.signature} được mã hóa base64url. Đề tài sử dụng
+thuật toán ký \texttt{HS256} (HMAC-SHA256 với khóa bí mật) -- phù hợp cho
+mô hình một service đơn lẻ xác thực và tiêu thụ token cho chính nó. Trong
+các kiến trúc phức tạp hơn với nhiều service tiêu thụ, \texttt{RS256} với
+cặp khóa bất đối xứng là lựa chọn tốt hơn, nhưng nằm ngoài phạm vi của đề
+tài.
+
+Đặc tính cốt lõi của JWT là tính \textit{stateless} -- server không cần
+lưu trạng thái session ở phía mình; chỉ cần verify chữ ký và đọc claim.
+Đặc tính này phù hợp với mô hình triển khai container hóa của đề tài: các
+instance WAF có thể được scale ngang mà không cần share session store.
+
+\textbf{Dual-mode delivery}: Đề tài hiện thực hóa hai cơ chế song song để
+client gửi JWT về server. Cơ chế thứ nhất là \textit{HttpOnly cookie} --
+JWT được set vào cookie với cờ \texttt{HttpOnly} (JavaScript không thể đọc,
+chống XSS exfiltration), \texttt{Secure} (chỉ gửi qua HTTPS), và
+\texttt{SameSite=Lax} (giảm thiểu CSRF). Đây là cơ chế mặc định cho dashboard
+web. Cơ chế thứ hai là \textit{Authorization Bearer header} -- client gửi
+header \texttt{Authorization: Bearer <token>}; phù hợp cho API client và
+các kịch bản scripting. Middleware xác thực kiểm tra cả hai nguồn, cho phép
+một backend thống nhất phục vụ cả browser-based dashboard lẫn API
+integration.
+
+\subsection{Bcrypt: hashing mật khẩu với cost factor}
+\label{subsection:3.6.2}
+
+Bcrypt là hàm hash mật khẩu được Niels Provos và David Mazières giới thiệu
+năm 1999, dựa trên thuật toán mã hóa Blowfish nhưng được điều chỉnh để
+trở thành hàm hash một chiều, cố ý chậm. Đặc tính then chốt của bcrypt là
+tham số \textit{cost factor} -- số mũ trên một biến đếm vòng lặp nội bộ
+(work factor = \(2^{\text{cost}}\)) -- cho phép tăng chi phí tính toán
+theo thời gian khi phần cứng nhanh hơn, mà không thay đổi giao diện hàm.
+
+Đề tài sử dụng cost factor 10 (1024 vòng) -- giá trị mặc định của gói
+\texttt{golang.org/x/crypto/bcrypt}, tương ứng với khoảng 60--80 mili giây
+để hash một mật khẩu trên phần cứng phổ thông. Mức cost này được khuyến nghị
+bởi OWASP Password Storage Cheat Sheet (2023) như mức cân bằng giữa an toàn
+chống brute force và trải nghiệm người dùng (đăng nhập không bị cảm nhận
+được độ trễ).
+
+So với các hàm hash mật khẩu hiện đại hơn (Argon2, scrypt), bcrypt vẫn được
+coi là chấp nhận được cho hầu hết các use case và có lợi thế là thư viện
+sẵn sàng, được kiểm chứng, và không yêu cầu cấu hình bộ nhớ phức tạp. Đề
+tài chấp nhận đánh đổi này do tập user nội bộ có quy mô nhỏ, không phải
+target chính của các cuộc tấn công brute force quy mô lớn.
+
+\subsection{RBAC: ba vai trò admin / editor / viewer}
+\label{subsection:3.6.3}
+
+Role-Based Access Control (RBAC) là mô hình phân quyền cổ điển trong đó
+quyền truy cập được gán cho \textit{vai trò} thay vì cho cá nhân; người dùng
+được gán một (hoặc nhiều) vai trò, và quyền của họ là tổng hợp các quyền
+của các vai trò đó. Đề tài hiện thực hóa phiên bản đơn giản nhất của RBAC
+với mỗi người dùng có đúng một vai trò.
+
+\textbf{Ma trận phân quyền}: Bảng \ref{table:rbac-matrix} liệt kê các thao
+tác nhạy cảm và vai trò có quyền thực hiện.
+
+\begin{table}[h!]
+\centering
+\caption{Ma trận phân quyền RBAC ba vai trò}
+\label{table:rbac-matrix}
+\small
+\begin{tabular}{|p{6cm}|c|c|c|}
+\hline
+\textbf{Thao tác} & \textbf{admin} & \textbf{editor} & \textbf{viewer} \\
+\hline
+Xem dashboard, audit log & \checkmark & \checkmark & \checkmark \\
+\hline
+Cập nhật thông tin cá nhân (\texttt{/me}) & \checkmark & \checkmark & \checkmark \\
+\hline
+Đổi mật khẩu của mình (\texttt{/me/password}) & \checkmark & \checkmark & \checkmark \\
+\hline
+Sửa rule, IP list, system settings & \checkmark & \checkmark & -- \\
+\hline
+Cấu hình kênh cảnh báo & \checkmark & \checkmark & -- \\
+\hline
+CRUD tài khoản người dùng khác & \checkmark & -- & -- \\
+\hline
+Reset mật khẩu của người khác & \checkmark & -- & -- \\
+\hline
+\end{tabular}
+\end{table}
+
+\textbf{Hiện thực hóa}: Vai trò được lưu ở cột \texttt{role} của bảng
+\texttt{users} với ràng buộc \texttt{CHECK} ở mức schema (mục
+\ref{subsection:3.5.3}). Tại runtime, hai middleware được sử dụng:
+\texttt{requireAuthN} chỉ yêu cầu JWT hợp lệ (cho phép mọi role có token),
+và \texttt{requireAdmin} thêm điều kiện \texttt{claim.role = "admin"}.
+Các endpoint admin-only được gate qua \texttt{requireAdmin}; các endpoint
+chỉ yêu cầu đăng nhập (như \texttt{/me}) qua \texttt{requireAuthN}.
+
+\textbf{Bảo vệ chống lockout}: Đặc thù của bài toán quản trị tài khoản là
+khả năng tự đẩy hệ thống vào trạng thái không thể phục hồi -- ví dụ admin
+duy nhất tự xóa hoặc tự demote chính mình, dẫn đến hệ thống không còn admin
+nào. Để chống lại, đề tài định nghĩa hai bất biến (invariant) được kiểm tra
+ở tầng handler trước khi commit thay đổi: \textit{last-admin protection}
+(không cho phép xóa hoặc demote admin cuối cùng, dựa trên truy vấn
+\texttt{SELECT COUNT(*) FROM users WHERE role = 'admin'}) và \textit{self-action
+protection} (admin không được xóa/demote chính tài khoản đang đăng nhập).
+Hai bất biến này được trình bày chi tiết ở mục \ref{subsection:2.2.10}.
+
+% ====================================================================
+\section{Token Bucket -- Thuật toán Rate Limiting}
+\label{section:3.7}
+
+\subsection{Khái quát Token Bucket}
+\label{subsection:3.7.1}
+
+Token Bucket là một thuật toán điều khiển tải đường truyền cổ điển được
+mô tả lần đầu trong bối cảnh quản lý chất lượng dịch vụ mạng (QoS) cuối
+thập niên 1980. Mô hình hoạt động dựa trên hình ảnh trực quan của một
+\textit{bucket} (xô) chứa các \textit{token} (thẻ). Bucket có hai tham số:
+\textit{rate} (số token được rót vào bucket mỗi giây) và \textit{burst}
+(kích thước tối đa của bucket). Mỗi request đến cần lấy đi một token mới
+được phục vụ; nếu bucket trống, request bị từ chối hoặc được đưa vào hàng
+chờ.
+
+Đặc tính then chốt của Token Bucket là cho phép \textit{burst} ngắn hạn:
+nếu một thời gian dài không có request, bucket được tích lũy đầy token và
+có thể phục vụ một spike traffic mà không phạt; sau đó traffic phải trở về
+dưới rate trung bình để bucket có thời gian phục hồi. Hành vi này phù hợp
+hơn với traffic web thực tế (có tính burst tự nhiên) so với mô hình
+\textit{leaky bucket} cổ điển vốn áp đặt rate cứng tại mọi thời điểm.
+
+\subsection{So sánh với các thuật toán khác}
+\label{subsection:3.7.2}
+
+So với \textbf{Sliding Window Counter}, Token Bucket nhẹ hơn về bộ nhớ
+(chỉ cần lưu hai giá trị: số token hiện tại và timestamp lần cập nhật),
+trong khi Sliding Window cần lưu chuỗi timestamp của các request gần đây.
+Tuy nhiên, Sliding Window cho điểm chính xác hơn ở biên cửa sổ -- một điểm
+yếu của Token Bucket ít quan trọng trong bài toán của đề tài.
+
+So với \textbf{Fixed Window Counter}, Token Bucket không gặp vấn đề
+``boundary spike'' -- khi attacker gửi burst kép ở hai bên ranh giới cửa sổ
+để vượt qua giới hạn danh nghĩa. Mỗi bucket trong Token Bucket cập nhật
+liên tục theo thời gian, không có ranh giới rạch ròi.
+
+\subsection{Tích hợp vào middleware stack}
+\label{subsection:3.7.3}
+
+Trong hệ thống, mỗi địa chỉ IP có một bucket riêng. Toàn bộ tập bucket được
+lưu trong một \texttt{sync.Map} cho phép truy cập concurrent không cần lock
+tường minh. Một goroutine quét định kỳ (mỗi 5 phút) loại bỏ các bucket có
+trạng thái không hoạt động lâu hơn 10 phút, ngăn chặn rò rỉ bộ nhớ khi
+IP space biến động lớn.
+
+Rate Limiter được đặt trong middleware stack sau \textit{IP-check middleware}
+(blacklist/whitelist) và trước \textit{rule engine middleware}, theo nguyên
+tắc \textit{cheap check first}: từ chối sớm các request không cần xử lý sâu.
+Khi một IP vượt quá ngưỡng cho phép liên tục, IP đó được tự động bổ sung
+vào blacklist động với TTL ngắn (mặc định 1 giờ) -- đây là cơ chế phòng vệ
+hành vi (behavior-based defense) bổ sung cho rule pattern matching.
+
+% ====================================================================
+\section{Docker và Docker Compose -- Đóng gói và triển khai}
+\label{section:3.8}
+
+\subsection{Containerization các thành phần}
+\label{subsection:3.8.1}
+
+Docker là công nghệ container hóa được phát triển từ năm 2013, đóng gói
+ứng dụng cùng toàn bộ phụ thuộc runtime vào một image duy nhất, đảm bảo
+tính tái lập của môi trường thực thi. Đề tài đóng gói ba thành phần riêng
+biệt: \textbf{(i)} WAF core (binary Go biên dịch tĩnh, image dựa trên
+\texttt{scratch} hoặc \texttt{distroless} với kích thước dưới 30 MB);
+\textbf{(ii)} ML Inference Service (image dựa trên \texttt{python:3.13-slim}
+kèm phụ thuộc PyTorch và transformers, kích thước khoảng 1.5 GB do model
+weight); và \textbf{(iii)} PostgreSQL (image chính thức \texttt{postgres:15}).
+
+Việc đóng gói theo Docker mang lại ba lợi ích cụ thể. Thứ nhất, tách biệt
+runtime: WAF binary không cần Python hay PyTorch ở máy đích, và ngược lại.
+Thứ hai, cùng image có thể chạy trên mọi nền tảng host hỗ trợ Docker, từ
+máy trạm phát triển đến server sản xuất, không phụ thuộc hệ điều hành cụ
+thể. Thứ ba, image có thể được publish lên registry (Docker Hub, GHCR) và
+phân phối với version tag rõ ràng, hỗ trợ rollback nhanh khi cần.
+
+\subsection{Docker Compose one-command deployment}
+\label{subsection:3.8.2}
+
+Docker Compose là công cụ điều phối multi-container ở quy mô một máy
+chủ đơn, dựa trên tệp YAML mô tả tập service, mạng và volume. Đề tài cung
+cấp tệp \texttt{docker-compose.db.yml} mô tả ba service nói trên, với các
+cấu hình quan trọng: ánh xạ cổng (\texttt{8080}, \texttt{8443} cho WAF;
+\texttt{8000} cho ML; \texttt{5432} cho PostgreSQL), volume mount cho dữ
+liệu PostgreSQL (\texttt{postgres\_data} -- persistent), và biến môi trường
+nạp từ tệp \texttt{.env}.
+
+Toàn bộ triển khai được khởi động bằng một lệnh: \texttt{docker compose up
+-d}. Đối với người dùng mới, đề tài cung cấp thêm script
+\texttt{scripts/setup\_db.sh} thực hiện migration ban đầu (tạo schema, seed
+admin mặc định) và \texttt{scripts/generate\_certs.sh} sinh self-signed TLS
+certificate cho môi trường thử nghiệm.
+
+\subsection{Lý do lựa chọn}
+\label{subsection:3.8.3}
+
+So với các giải pháp đóng gói khác như \textbf{tar archive thuần} (yêu cầu
+cài thủ công phụ thuộc) hay \textbf{Kubernetes manifest} (phức tạp quá mức
+cho quy mô đề tài), Docker Compose ở mức cân bằng phù hợp: đủ mạnh để mô tả
+multi-service deployment với network và volume rõ ràng, đủ đơn giản để một
+sinh viên hay kỹ sư DevOps mới có thể vận hành mà không cần hạ tầng cluster.
+
+Đối với các triển khai sản xuất quy mô lớn hơn, Docker Compose có thể được
+chuyển đổi sang Kubernetes manifest (qua công cụ \texttt{kompose}) hoặc
+Helm chart, nhưng phép thay đổi này không thuộc phạm vi đề tài.
+
+\bigskip
+\noindent\textbf{Kết chương.}
+Chương này đã trình bày tám lớp công nghệ cốt lõi tạo nên hệ thống: Go cho
+WAF core với mô hình goroutine và GC độ trễ thấp; Rule Engine với mô hình
+anomaly scoring và transform chain chống evasion; DistilBERT cho lớp ML
+xác minh vùng xám; FastAPI/Python cho ML Inference Service tách biệt
+runtime; PostgreSQL cho lưu trữ quan hệ với ràng buộc tính toàn vẹn ở mức
+schema; JWT và bcrypt cho xác thực không trạng thái và lưu mật khẩu an
+toàn, kết hợp với RBAC ba vai trò admin/editor/viewer cùng các bất biến
+bảo vệ chống lockout; Token Bucket cho điều khiển tải per-IP với khả năng
+chịu burst; và Docker Compose cho đóng gói triển khai một lệnh. Mỗi lựa
+chọn được lý giải thông qua so sánh với các ứng cử viên thay thế và đối
+chiếu với các yêu cầu phi chức năng đã xác định ở mục \ref{section:2.4}.
+Đây là cơ sở công nghệ trực tiếp cho phần thiết kế và hiện thực hóa hệ
+thống được trình bày trong Chương \ref{section:4.1}.
+
+\end{document}

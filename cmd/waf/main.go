@@ -130,6 +130,37 @@ var (
 	version    = flag.String("version", "1.0.0", "WAF version")
 )
 
+// classifySystemEventSeverity maps known system event types to alert
+// severities so the notifier's MinSeverity gate stays meaningful.
+//
+//   - HIGH   — anything *_ERROR, plus admin actions that mutate WAF
+//     behaviour or audit trails (config changes, log purges, role/user
+//     deletions, password resets). These pass the default min_severity=HIGH
+//     out of the box.
+//   - MEDIUM — admin-initiated but lower-impact account ops
+//     (user/email creation, password change).
+//   - INFO   — operational chatter (login, register, profile edit).
+//
+// LogSecurityEvent may override via Metadata["severity"], which always wins.
+func classifySystemEventSeverity(eventType string) string {
+	if strings.HasSuffix(eventType, "_ERROR") {
+		return "HIGH"
+	}
+	switch eventType {
+	case "CONFIG_CHANGE",
+		"LOGS_CLEARED",
+		"USER_DELETED",
+		"USER_ROLE_CHANGED",
+		"USER_PASSWORD_RESET_BY_ADMIN":
+		return "HIGH"
+	case "USER_CREATED_BY_ADMIN",
+		"USER_EMAIL_CHANGED_BY_ADMIN",
+		"USER_PASSWORD_CHANGED":
+		return "MEDIUM"
+	}
+	return "INFO"
+}
+
 func main() {
 	flag.Parse()
 
@@ -381,12 +412,14 @@ func main() {
 		}
 	}
 	alertNotifier := notifier.New(notifier.Config{
-		Enabled:         cfg.Alerts.Enabled,
-		MinSeverity:     cfg.Alerts.MinSeverity,
-		ThrottleSeconds: cfg.Alerts.ThrottleSeconds,
-		Slack:           slackDests,
-		Email:           emailDests,
-		Webhook:         webhookDests,
+		Enabled:           cfg.Alerts.Enabled,
+		MinSeverity:       cfg.Alerts.MinSeverity,
+		ThrottleSeconds:   cfg.Alerts.ThrottleSeconds,
+		SendRequestEvents: cfg.Alerts.SendRequestEvents,
+		SendSystemEvents:  cfg.Alerts.SendSystemEvents,
+		Slack:             slackDests,
+		Email:             emailDests,
+		Webhook:           webhookDests,
 	})
 	defer alertNotifier.Close()
 	if cfg.Alerts.Enabled {
@@ -394,6 +427,33 @@ func main() {
 	} else {
 		log.Println("○ Alerts disabled (enable via /dashboard or alerts.enabled in YAML)")
 	}
+
+	// Wire the audit logger's system-event hook → dashboard buffer and
+	// alert notifier. Without this, LogSystemEvent calls (config change,
+	// persist error, log clear) end up in the file log but never reach
+	// the live dashboard or any alert channel. The sink callback runs
+	// synchronously on the goroutine that triggered the event, but both
+	// targets are non-blocking (in-memory append + bounded send queue).
+	auditLogger.SetSystemSink(func(e *audit.AuditEntry) {
+		api.AddToLogBuffer(e)
+		eventType, _ := e.Metadata["event_type"].(string)
+		severity := classifySystemEventSeverity(eventType)
+		// LogSecurityEvent injects an explicit severity in Metadata —
+		// prefer that when present.
+		if s, ok := e.Metadata["severity"].(string); ok && s != "" {
+			severity = strings.ToUpper(s)
+		}
+		alertNotifier.Send(notifier.Event{
+			Kind:      notifier.KindSystem,
+			Timestamp: e.Timestamp,
+			Decision:  e.Decision,
+			Severity:  severity,
+			ClientIP:  e.ClientIP,
+			Reason:    e.BlockReason,
+			RuleID:    eventType,
+			RequestID: e.RequestID,
+		})
+	})
 
 	// Create WAF middleware with log buffer integration
 	wafMiddleware := middleware.NewWAFWithLogBuffer(&middleware.WAFConfig{

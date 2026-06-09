@@ -12,8 +12,14 @@ parser:
   max_body_size: 10485760 # 10MB
 
 rate_limit:
+  # Rate limiting is opt-in per path. With `endpoint_limits` empty, NO
+  # path is throttled. Add entries (exact paths or subtree patterns
+  # ending in "/") via the dashboard → Config → Rate Limit; the
+  # numbers below are the default rpm/burst applied to any entry
+  # whose own fields are left at zero.
   requests_per_min: 1000
   burst_size: 100
+  endpoint_limits: {}
 
 behavior:
   bruteforce_threshold: 5
@@ -48,7 +54,7 @@ database:
   max_connections: 25
 
 auth:
-  jwt_secret: "your-secret-key-change-this-in-production-256-bit-minimum"
+  jwt_secret: "6ea7ab691c3664c257b56bc2e106693caf4797e9bd2959ce5e014585b8620d44"
   jwt_expiry: "24h"
   bcrypt_cost: 10
   require_auth: false  # Set to true to enable authentication
@@ -104,8 +110,13 @@ ml:
   timeout: 800ms
   max_body_len: 4096
 
-  # Gray-zone bounds. Default block_threshold=5.0, challenge_threshold=4.0.
-  gray_lower: 4.0
+  # Gray-zone bounds. block_threshold=5.0, challenge_threshold=4.0.
+  # Widened lower bound 4.0 -> 3.0 for the anomaly-scoring "indicator" rules
+  # (IND-* in all_rules.json): each weak sign adds ~1.0 (low) / 2.0 (medium),
+  # so a request showing ~3 weak signs lands at 3.0–4.9 and is sent to the
+  # model to adjudicate instead of silently passing. Raise back to 4.0 if ML
+  # call volume / latency becomes a concern.
+  gray_lower: 3.0
   gray_upper: 5.0
 
   # Score adjustments applied when confidence ≥ confidence_threshold.

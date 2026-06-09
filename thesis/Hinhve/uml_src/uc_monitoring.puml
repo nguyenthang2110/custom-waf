@@ -1,0 +1,59 @@
+@startuml uc_monitoring
+' Use case phân rã: Giám sát và xem log (mục 2.2.4)
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName "Times"
+skinparam defaultFontSize 14
+skinparam linetype ortho
+skinparam usecase {
+  BackgroundColor #FFF7C2
+  BorderColor #555555
+  FontSize 13
+}
+skinparam actor {
+  BorderColor #333333
+  FontSize 13
+}
+skinparam note {
+  BackgroundColor #FFFBE0
+  BorderColor #888888
+  FontSize 12
+}
+
+actor "Viewer" as viewer
+actor "Editor" as editor
+actor "Admin"  as admin
+editor --|> viewer
+admin  --|> editor
+
+actor "Audit Store\n(PostgreSQL)" as db   << system >>
+actor "Prometheus" as prom                << system >>
+
+rectangle "UC: Giám sát và xem log" {
+  usecase "Xem dashboard\nreal-time"          as UC_DASH
+  usecase "Tra cứu\naudit log"                as UC_LOGS
+  usecase "Lọc log\n(thời gian/IP/loại/QĐ)"   as UC_FILTER
+  usecase "Xem chi tiết\nbản ghi"             as UC_DETAIL
+  usecase "Phân trang phía server\n+ index"   as UC_PAGE
+  usecase "Scrape metric\nPrometheus"         as UC_METRIC
+}
+
+note right of UC_PAGE
+  Alt-flow: với hàng triệu bản ghi,
+  index theo timestamp & IP giữ
+  thời gian truy vấn < 1 giây.
+end note
+
+viewer --> UC_DASH
+viewer --> UC_LOGS
+
+UC_LOGS ..> UC_FILTER : <<include>>
+UC_LOGS ..> UC_DETAIL : <<extend>>
+UC_LOGS ..> UC_PAGE   : <<include>>
+
+UC_DASH   --> prom
+UC_METRIC --> prom
+UC_LOGS   --> db
+UC_DETAIL --> db
+
+@enduml

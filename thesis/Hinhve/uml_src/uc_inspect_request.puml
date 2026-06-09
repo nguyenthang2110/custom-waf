@@ -1,0 +1,66 @@
+@startuml uc_inspect_request
+' Use case phân rã: Kiểm tra HTTP request
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName "Times"
+skinparam defaultFontSize 14
+skinparam linetype ortho
+skinparam usecase {
+  BackgroundColor #FFF7C2
+  BorderColor #555555
+  FontSize 13
+}
+skinparam actor {
+  BorderColor #333333
+  FontSize 13
+}
+skinparam note {
+  BackgroundColor #FFFBE0
+  BorderColor #888888
+  FontSize 12
+}
+
+actor "Visitor" as visitor
+actor "Rule Engine" as engine
+actor "ML Service\n(DistilBERT)" as ml
+actor "State Store" as store
+actor "Audit Log" as audit
+
+rectangle "UC: Kiểm tra HTTP request" {
+  usecase "Tiếp nhận\nrequest" as UC_RECV
+  usecase "Phân tích &\nchuẩn hóa" as UC_PARSE
+  usecase "Kiểm tra\nIP danh sách" as UC_IP
+  usecase "Kiểm tra\nrate limit" as UC_RL
+  usecase "Chạy rule\nengine" as UC_RULES
+  usecase "Tham vấn\nML (gray zone)" as UC_ML
+  usecase "Ra quyết định\n(allow/challenge/block)" as UC_DEC
+  usecase "Ghi audit log\n& training data" as UC_AUDIT
+}
+
+note right of UC_ML
+  Condition: score ∈ [4.0, 5.0)
+  Extension Point: ml_consult
+end note
+
+note right of UC_DEC
+  block ≥ 5.0
+  challenge ≥ 4.0
+  log ≥ 3.0
+end note
+
+visitor --> UC_RECV
+UC_RECV ..> UC_PARSE : <<include>>
+UC_PARSE ..> UC_IP : <<include>>
+UC_IP ..> UC_RL : <<include>>
+UC_RL ..> UC_RULES : <<include>>
+UC_RULES ..> UC_ML : <<extend>>
+UC_RULES ..> UC_DEC : <<include>>
+UC_DEC ..> UC_AUDIT : <<include>>
+
+UC_IP --> store
+UC_RL --> store
+UC_RULES --> engine
+UC_ML --> ml
+UC_AUDIT --> audit
+
+@enduml

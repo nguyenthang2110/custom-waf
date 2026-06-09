@@ -1,0 +1,96 @@
+@startuml activity_request_pipeline
+' Biểu đồ hoạt động: quy trình kiểm tra request 9 bước
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName "Times"
+skinparam defaultFontSize 14
+skinparam activity {
+  BackgroundColor #FFF7C2
+  BorderColor #555555
+  FontSize 13
+}
+skinparam activityDiamond {
+  BackgroundColor #FFE9A8
+  BorderColor #555555
+  FontSize 13
+}
+skinparam ArrowColor #333333
+skinparam ArrowThickness 1.2
+
+start
+
+:Nhận HTTP request từ client;
+
+if (Đường dẫn thuộc\nadmin path?) then (có)
+  if (IP nằm trong\nadmin allowed CIDRs?) then (không)
+    :Trả về 404 (ẩn admin);
+    stop
+  else (có)
+  endif
+else (không)
+endif
+
+if (Đường dẫn nằm trong\nbypass paths?) then (có)
+  :Forward thẳng tới upstream;
+  stop
+else (không)
+endif
+
+:Parse & chuẩn hóa\nrequest (ParsedRequest);
+
+if (IP whitelisted?) then (có)
+  :Forward (bỏ qua kiểm tra);
+  stop
+elseif (IP blacklisted?) then (có)
+  :Block (403);
+  :Ghi audit log;
+  stop
+else (không)
+endif
+
+if (Vượt rate limit?) then (có)
+  :Tăng vi phạm; có thể\nthêm vào blacklist động;
+  :Block (429);
+  :Ghi audit log;
+  stop
+else (không)
+endif
+
+:Chạy rule engine\n(36 rule × transforms);
+:Tính anomaly score\nS = Σ s_r × m_r;
+
+if (score ∈ [gray_lower,\ngray_upper)?) then (có)
+  :Gọi ML service\nPOST /predict;
+  if (Timeout/lỗi?) then (có)
+    :Giữ nguyên score\n(fail-open);
+  elseif (Label = attack &\nconf ≥ threshold?) then (có)
+    :score += attack_bump;
+  else (normal)
+    :score -= normal_penalty;
+  endif
+else (không)
+endif
+
+if (score ≥ block_threshold?) then (có)
+  :Hành động = BLOCK;
+elseif (score ≥ challenge_threshold?) then (có)
+  :Hành động = CHALLENGE;
+else (không)
+  :Hành động = ALLOW;
+endif
+
+fork
+  :Ghi audit log\n(Postgres + file);
+fork again
+  :Ghi training JSONL\n(canonical text);
+end fork
+
+if (Hành động = ALLOW\nhoặc CHALLENGE\nthành công?) then (có)
+  :Forward tới upstream;
+else (BLOCK / CHALLENGE fail)
+  :Trả response chặn;
+endif
+
+stop
+
+@enduml

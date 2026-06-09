@@ -1,0 +1,60 @@
+@startuml uc_alert_notification
+' Use case phân rã: Cảnh báo sự kiện bảo mật (mục 2.2.7)
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName "Times"
+skinparam defaultFontSize 14
+skinparam linetype ortho
+skinparam usecase {
+  BackgroundColor #FFF7C2
+  BorderColor #555555
+  FontSize 13
+}
+skinparam actor {
+  BorderColor #333333
+  FontSize 13
+}
+skinparam note {
+  BackgroundColor #FFFBE0
+  BorderColor #888888
+  FontSize 12
+}
+
+actor "Admin" as admin
+actor "Decision Layer" as decision   << system >>
+actor "Notifier worker" as worker    << system >>
+actor "Slack"   as slack    << external >>
+actor "Email\n(SMTP)" as mail << external >>
+actor "Webhook" as hook     << external >>
+
+rectangle "UC: Cảnh báo sự kiện bảo mật" {
+  usecase "Cấu hình kênh\n(Slack/Email/Webhook)" as UC_CONFIG
+  usecase "Xem thống kê\nsent/failed"            as UC_STATS
+  usecase "Gửi test\nnotification"               as UC_TEST
+  usecase "Tiếp nhận sự kiện\nBLOCK/CHALLENGE"    as UC_RECV
+  usecase "Throttle / dedup\n(IP,ruleID) 300s"   as UC_THROTTLE
+  usecase "Fan-out kênh\nđã bật"                 as UC_FANOUT
+}
+
+note right of UC_RECV
+  Trigger: severity >= HIGH.
+  Kênh fail -> ghi nhận &
+  tiếp tục các kênh còn lại.
+end note
+
+admin --> UC_CONFIG
+admin --> UC_STATS
+admin --> UC_TEST
+
+decision --> UC_RECV
+worker   --> UC_FANOUT
+
+UC_RECV ..> UC_THROTTLE : <<include>>
+UC_RECV ..> UC_FANOUT   : <<include>>
+UC_TEST ..> UC_FANOUT   : <<include>>
+
+UC_FANOUT --> slack
+UC_FANOUT --> mail
+UC_FANOUT --> hook
+
+@enduml

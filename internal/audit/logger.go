@@ -29,6 +29,14 @@ type Logger struct {
 	// fast shutdown drops the tail end of the audit log on a busy WAF.
 	asyncWG sync.WaitGroup
 	closed  bool
+
+	// systemSink is fired synchronously from LogSystemEvent /
+	// LogSecurityEvent. The api package wires it to push into the
+	// dashboard ring buffer + the notifier — without this hook system
+	// events would only land in the file log, invisible to live UI.
+	// Request entries don't trigger this sink; the middleware already
+	// pushes those directly to the dashboard buffer.
+	systemSink func(*AuditEntry)
 }
 
 // AuditConfig defines audit logging configuration
@@ -578,6 +586,29 @@ func ParseLogLine(line string) (*AuditEntry, error) {
 // Structured Logging Helpers
 // ============================================================================
 
+// SetSystemSink registers a callback invoked synchronously when
+// LogSystemEvent or LogSecurityEvent fires. Used by the API layer to
+// push system events into the dashboard ring buffer and the alert
+// notifier (which only knows about the audit logger via this hook).
+// Nil is allowed and clears any previously set sink.
+func (l *Logger) SetSystemSink(sink func(*AuditEntry)) {
+	l.mu.Lock()
+	l.systemSink = sink
+	l.mu.Unlock()
+}
+
+// fireSystemSink invokes the registered sink under a separate lock
+// acquisition so the sink itself can call back into the logger
+// without deadlocking.
+func (l *Logger) fireSystemSink(entry *AuditEntry) {
+	l.mu.Lock()
+	sink := l.systemSink
+	l.mu.Unlock()
+	if sink != nil {
+		sink(entry)
+	}
+}
+
 // LogSecurityEvent logs a security event with context
 func (l *Logger) LogSecurityEvent(
 	eventType string,
@@ -602,6 +633,7 @@ func (l *Logger) LogSecurityEvent(
 	entry.Metadata["event_type"] = eventType
 	entry.Metadata["severity"] = severity
 
+	l.fireSystemSink(entry)
 	l.Log(entry)
 }
 
@@ -618,5 +650,6 @@ func (l *Logger) LogSystemEvent(eventType string, message string) {
 		},
 	}
 
+	l.fireSystemSink(entry)
 	l.Log(entry)
 }

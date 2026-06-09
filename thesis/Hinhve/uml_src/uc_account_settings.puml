@@ -1,0 +1,54 @@
+@startuml uc_account_settings
+' Use case phân rã: Cài đặt tài khoản
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName "Times"
+skinparam defaultFontSize 14
+skinparam linetype ortho
+skinparam usecase {
+  BackgroundColor #FFF7C2
+  BorderColor #555555
+  FontSize 13
+}
+skinparam actor {
+  BorderColor #333333
+  FontSize 13
+}
+skinparam note {
+  BackgroundColor #FFFBE0
+  BorderColor #888888
+  FontSize 12
+}
+
+actor "Người dùng\n(admin/editor/viewer)" as user
+actor "Auth Service" as auth
+actor "User Repository" as repo
+
+rectangle "UC: Cài đặt tài khoản" {
+  usecase "Xem thông tin\ntài khoản" as UC_VIEW
+  usecase "Đổi email" as UC_EMAIL
+  usecase "Đổi mật khẩu" as UC_PWD
+  usecase "Xác thực\nmật khẩu cũ" as UC_OLD
+  usecase "Băm mật khẩu\nmới (bcrypt)" as UC_HASH
+}
+
+note right of UC_OLD
+  Condition: yêu cầu đổi
+  mật khẩu
+  Extension Point: pwd_change
+end note
+
+user --> UC_VIEW
+user --> UC_EMAIL
+user --> UC_PWD
+
+UC_PWD ..> UC_OLD  : <<include>>
+UC_PWD ..> UC_HASH : <<include>>
+
+UC_VIEW --> auth
+UC_EMAIL --> repo
+UC_OLD --> auth
+UC_HASH --> auth
+UC_PWD --> repo
+
+@enduml

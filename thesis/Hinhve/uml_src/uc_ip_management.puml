@@ -1,0 +1,61 @@
+@startuml uc_ip_management
+' Use case phân rã: Quản lý IP blacklist/whitelist
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName "Times"
+skinparam defaultFontSize 14
+skinparam linetype ortho
+skinparam usecase {
+  BackgroundColor #FFF7C2
+  BorderColor #555555
+  FontSize 13
+}
+skinparam actor {
+  BorderColor #333333
+  FontSize 13
+}
+skinparam note {
+  BackgroundColor #FFFBE0
+  BorderColor #888888
+  FontSize 12
+}
+
+actor "Operator/Admin" as user
+actor "Rate Limiter" as rl
+actor "State Store" as store
+actor "Database" as db
+
+rectangle "UC: Quản lý IP danh sách" {
+  usecase "Liệt kê IP\nblacklist/whitelist" as UC_LIST
+  usecase "Thêm IP\nthủ công" as UC_ADD
+  usecase "Xóa IP" as UC_DEL
+  usecase "Đặt thời hạn\n(TTL)" as UC_TTL
+  usecase "Tự động chặn\nIP vi phạm" as UC_AUTO
+  usecase "Đồng bộ cache\nin-memory" as UC_SYNC
+}
+
+note right of UC_AUTO
+  Condition: vượt ngưỡng
+  rate limit liên tục
+  Extension Point: auto_block
+end note
+
+user --> UC_LIST
+user --> UC_ADD
+user --> UC_DEL
+user --> UC_TTL
+
+UC_ADD ..> UC_SYNC : <<include>>
+UC_DEL ..> UC_SYNC : <<include>>
+UC_TTL ..> UC_SYNC : <<include>>
+
+rl --> UC_AUTO
+UC_AUTO ..> UC_SYNC : <<include>>
+
+UC_LIST --> db
+UC_SYNC --> store
+UC_ADD --> db
+UC_DEL --> db
+UC_TTL --> db
+
+@enduml

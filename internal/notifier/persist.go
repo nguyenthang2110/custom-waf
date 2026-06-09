@@ -190,14 +190,16 @@ func (n *Notifier) RestoreState(data []byte) error {
 // =============================================================================
 
 type destConfigSnapshotV1 struct {
-	Version         int                  `json:"version"`
-	SavedAt         time.Time            `json:"saved_at"`
-	Enabled         bool                 `json:"enabled"`
-	MinSeverity     string               `json:"min_severity"`
-	ThrottleSeconds int                  `json:"throttle_seconds"`
-	Slack           []SlackDestination   `json:"slack"`
-	Email           []EmailDestination   `json:"email"`
-	Webhook         []WebhookDestination `json:"webhook"`
+	Version           int                  `json:"version"`
+	SavedAt           time.Time            `json:"saved_at"`
+	Enabled           bool                 `json:"enabled"`
+	MinSeverity       string               `json:"min_severity"`
+	ThrottleSeconds   int                  `json:"throttle_seconds"`
+	SendRequestEvents bool                 `json:"send_request_events"`
+	SendSystemEvents  bool                 `json:"send_system_events"`
+	Slack             []SlackDestination   `json:"slack"`
+	Email             []EmailDestination   `json:"email"`
+	Webhook           []WebhookDestination `json:"webhook"`
 }
 
 // SnapshotDestinations serializes the destination config (Slack /
@@ -221,14 +223,16 @@ func (n *Notifier) SnapshotDestinations() ([]byte, error) {
 	copy(webhookCopy, n.cfg.Webhook)
 
 	snap := destConfigSnapshotV1{
-		Version:         1,
-		SavedAt:         time.Now(),
-		Enabled:         n.cfg.Enabled,
-		MinSeverity:     n.cfg.MinSeverity,
-		ThrottleSeconds: n.cfg.ThrottleSeconds,
-		Slack:           slackCopy,
-		Email:           emailCopy,
-		Webhook:         webhookCopy,
+		Version:           1,
+		SavedAt:           time.Now(),
+		Enabled:           n.cfg.Enabled,
+		MinSeverity:       n.cfg.MinSeverity,
+		ThrottleSeconds:   n.cfg.ThrottleSeconds,
+		SendRequestEvents: n.cfg.SendRequestEvents,
+		SendSystemEvents:  n.cfg.SendSystemEvents,
+		Slack:             slackCopy,
+		Email:             emailCopy,
+		Webhook:           webhookCopy,
 	}
 	return json.Marshal(&snap)
 }
@@ -252,13 +256,15 @@ func (n *Notifier) RestoreDestinations(data []byte) error {
 	n.mu.RUnlock()
 
 	n.SetConfig(Config{
-		Enabled:         snap.Enabled,
-		MinSeverity:     snap.MinSeverity,
-		ThrottleSeconds: snap.ThrottleSeconds,
-		Timeout:         currentTimeout,
-		Slack:           snap.Slack,
-		Email:           snap.Email,
-		Webhook:         snap.Webhook,
+		Enabled:           snap.Enabled,
+		MinSeverity:       snap.MinSeverity,
+		ThrottleSeconds:   snap.ThrottleSeconds,
+		SendRequestEvents: snap.SendRequestEvents,
+		SendSystemEvents:  snap.SendSystemEvents,
+		Timeout:           currentTimeout,
+		Slack:             snap.Slack,
+		Email:             snap.Email,
+		Webhook:           snap.Webhook,
 	})
 	return nil
 }

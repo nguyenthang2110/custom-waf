@@ -58,10 +58,22 @@ func sevOK(s, min string) bool {
 	return rs >= rm
 }
 
+// EventKind discriminates request-driven alerts from operator-driven
+// system events (config change, persist error, log buffer clear, etc.).
+// Default zero-value behaves as KindRequest so existing call sites stay
+// correct without an explicit kind.
+type EventKind string
+
+const (
+	KindRequest EventKind = "request"
+	KindSystem  EventKind = "system"
+)
+
 // Event describes a single WAF security event worth alerting on.
 type Event struct {
+	Kind      EventKind `json:"kind,omitempty"` // "request" (default) or "system"
 	Timestamp time.Time `json:"timestamp"`
-	Decision  string    `json:"decision"`   // BLOCK / CHALLENGE / LOG
+	Decision  string    `json:"decision"`   // BLOCK / CHALLENGE / LOG / SYSTEM
 	Severity  string    `json:"severity"`   // INFO/LOW/MEDIUM/HIGH/CRITICAL
 	ClientIP  string    `json:"client_ip"`
 	Method    string    `json:"method"`
@@ -86,6 +98,13 @@ type Config struct {
 	MinSeverity     string        `json:"min_severity"      yaml:"min_severity"`     // INFO..CRITICAL; default HIGH
 	ThrottleSeconds int           `json:"throttle_seconds"  yaml:"throttle_seconds"` // dedup window; default 300
 	Timeout         time.Duration `json:"-"                 yaml:"timeout"`          // per channel send; default 5s
+
+	// Per-kind toggles. Defaults: request events on, system events off —
+	// preserves the existing behavior (block/challenge → alert) while
+	// keeping operators from getting paged about their own dashboard
+	// clicks unless they explicitly opt in.
+	SendRequestEvents bool `json:"send_request_events" yaml:"send_request_events"`
+	SendSystemEvents  bool `json:"send_system_events"  yaml:"send_system_events"`
 
 	Slack   []SlackDestination   `json:"slack"   yaml:"slack"`
 	Email   []EmailDestination   `json:"email"   yaml:"email"`
@@ -218,18 +237,36 @@ type Notifier struct {
 	stats     atomicStats
 }
 
+// applyKindDefaults rescues persisted blobs / direct callers that don't
+// set either toggle. With both flags zero we'd silently swallow every
+// event — almost certainly not what the operator wants, since they
+// only ran the WAF to get alerts in the first place. Bump
+// SendRequestEvents to its historical default (true) in that case.
+// An operator who really wants alerts off should flip the master
+// Enabled switch.
+func applyKindDefaults(cfg *Config) {
+	if !cfg.SendRequestEvents && !cfg.SendSystemEvents {
+		cfg.SendRequestEvents = true
+	}
+}
+
 // New constructs a Notifier with sane defaults and starts the worker.
 // Caller must call Close on shutdown.
 func New(cfg Config) *Notifier {
 	if cfg.MinSeverity == "" {
 		cfg.MinSeverity = "HIGH"
 	}
-	if cfg.ThrottleSeconds <= 0 {
+	// Negative is treated as "fall back to default"; explicit zero is a
+	// supported value meaning "disable throttle entirely". Without this
+	// distinction operators can't actually turn dedup off — needed for
+	// the E2E test and for high-cardinality alerting setups.
+	if cfg.ThrottleSeconds < 0 {
 		cfg.ThrottleSeconds = 300
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 5 * time.Second
 	}
+	applyKindDefaults(&cfg)
 	n := &Notifier{
 		cfg:   cfg,
 		httpc: &http.Client{Timeout: cfg.Timeout},
@@ -248,12 +285,17 @@ func (n *Notifier) SetConfig(cfg Config) {
 	if cfg.MinSeverity == "" {
 		cfg.MinSeverity = "HIGH"
 	}
-	if cfg.ThrottleSeconds <= 0 {
+	// Negative is treated as "fall back to default"; explicit zero is a
+	// supported value meaning "disable throttle entirely". Without this
+	// distinction operators can't actually turn dedup off — needed for
+	// the E2E test and for high-cardinality alerting setups.
+	if cfg.ThrottleSeconds < 0 {
 		cfg.ThrottleSeconds = 300
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 5 * time.Second
 	}
+	applyKindDefaults(&cfg)
 	for i := range cfg.Slack {
 		if cfg.Slack[i].ID == "" {
 			cfg.Slack[i].ID = newDestID("slack")
@@ -327,9 +369,34 @@ func (n *Notifier) Send(e Event) {
 	n.mu.RLock()
 	enabled := n.cfg.Enabled
 	min := n.cfg.MinSeverity
+	sendReq := n.cfg.SendRequestEvents
+	sendSys := n.cfg.SendSystemEvents
 	n.mu.RUnlock()
 	if !enabled {
 		return
+	}
+	// Per-kind opt-in. An empty Kind defaults to KindRequest so legacy
+	// call sites (everything in middleware before this feature landed)
+	// continue to flow through the request channel.
+	kind := e.Kind
+	if kind == "" {
+		kind = KindRequest
+	}
+	switch kind {
+	case KindRequest:
+		if !sendReq {
+			return
+		}
+	case KindSystem:
+		if !sendSys {
+			return
+		}
+	default:
+		// Unknown kind: be permissive — treat like request so a future
+		// kind doesn't get silently swallowed by an older binary.
+		if !sendReq {
+			return
+		}
 	}
 	if !sevOK(e.Severity, min) {
 		n.stats.incBelowSev()

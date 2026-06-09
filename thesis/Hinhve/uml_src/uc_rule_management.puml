@@ -1,0 +1,59 @@
+@startuml uc_rule_management
+' Use case phân rã: Quản lý rule
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName "Times"
+skinparam defaultFontSize 14
+skinparam linetype ortho
+skinparam usecase {
+  BackgroundColor #FFF7C2
+  BorderColor #555555
+  FontSize 13
+}
+skinparam actor {
+  BorderColor #333333
+  FontSize 13
+}
+skinparam note {
+  BackgroundColor #FFFBE0
+  BorderColor #888888
+  FontSize 12
+}
+
+actor "Operator/Admin" as user
+actor "Rule Engine" as engine
+actor "File Store\n(all_rules.json)" as fs
+
+rectangle "UC: Quản lý rule" {
+  usecase "Liệt kê rule" as UC_LIST
+  usecase "Xem chi tiết\nrule" as UC_DETAIL
+  usecase "Bật/tắt rule" as UC_TOGGLE
+  usecase "Cập nhật điểm\nanomaly" as UC_SCORE
+  usecase "Tải lên\nfile rule mới" as UC_UPLOAD
+  usecase "Validate schema\n(v1 hoặc v2)" as UC_VALIDATE
+  usecase "Convert v1 → v2" as UC_CONVERT
+  usecase "Hot reload\nrule engine" as UC_RELOAD
+}
+
+note right of UC_CONVERT
+  Condition: rule input là v1
+  Extension Point: schema_normalize
+end note
+
+user --> UC_LIST
+user --> UC_DETAIL
+user --> UC_TOGGLE
+user --> UC_SCORE
+user --> UC_UPLOAD
+
+UC_UPLOAD ..> UC_VALIDATE : <<include>>
+UC_VALIDATE ..> UC_CONVERT : <<extend>>
+UC_UPLOAD ..> UC_RELOAD : <<include>>
+UC_TOGGLE ..> UC_RELOAD : <<include>>
+UC_SCORE  ..> UC_RELOAD : <<include>>
+
+UC_LIST --> fs
+UC_UPLOAD --> fs
+UC_RELOAD --> engine
+
+@enduml

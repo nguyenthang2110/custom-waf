@@ -4,6 +4,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"waf-project/internal/notifier"
 )
@@ -164,4 +165,112 @@ func (s *APIServer) handleAlertsTest(w http.ResponseWriter, r *http.Request) {
 		"channel": body.Channel,
 		"result":  result,
 	})
+}
+
+// handleAlertsTestBroadcast fires a synthetic event through notifier.Send()
+// so the operator can verify the FULL pipeline — kind toggle + severity gate
+// + throttle + every enabled destination — without having to wait for a real
+// block or config change.
+//
+// Body: {"kind": "request" | "system"}.
+//
+// We inspect the current config before firing so we can surface the actual
+// reason the event got dropped (alerts disabled, kind toggle off, etc.)
+// instead of leaving the user guessing why nothing arrived.
+//
+// The synthetic event uses Severity=HIGH and a unique RuleID per click so
+// throttle dedup doesn't suppress repeated clicks during debugging.
+func (s *APIServer) handleAlertsTestBroadcast(w http.ResponseWriter, r *http.Request) {
+	if s.notifier == nil {
+		http.Error(w, `{"error":"notifier not initialized"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	var body struct {
+		Kind string `json:"kind"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	kind := notifier.KindRequest
+	switch body.Kind {
+	case "system":
+		kind = notifier.KindSystem
+	case "request", "":
+		kind = notifier.KindRequest
+	default:
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"sent":   false,
+			"reason": "unknown kind: " + body.Kind + " (use \"request\" or \"system\")",
+		})
+		return
+	}
+
+	cfg := s.notifier.GetConfig()
+	reply := func(sent bool, reason string) {
+		dests := 0
+		switch kind {
+		case notifier.KindRequest, notifier.KindSystem:
+			for _, d := range cfg.Slack {
+				if d.Enabled {
+					dests++
+				}
+			}
+			for _, d := range cfg.Email {
+				if d.Enabled {
+					dests++
+				}
+			}
+			for _, d := range cfg.Webhook {
+				if d.Enabled {
+					dests++
+				}
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"sent":               sent,
+			"reason":             reason,
+			"kind":               string(kind),
+			"severity":           "HIGH",
+			"min_severity":       cfg.MinSeverity,
+			"enabled_dests":      dests,
+			"alerts_enabled":     cfg.Enabled,
+			"send_request_events": cfg.SendRequestEvents,
+			"send_system_events":  cfg.SendSystemEvents,
+		})
+	}
+
+	if !cfg.Enabled {
+		reply(false, "alerts are disabled globally — enable the master toggle first")
+		return
+	}
+	if kind == notifier.KindRequest && !cfg.SendRequestEvents {
+		reply(false, `"Send request events" toggle is OFF in General settings`)
+		return
+	}
+	if kind == notifier.KindSystem && !cfg.SendSystemEvents {
+		reply(false, `"Send system events" toggle is OFF in General settings`)
+		return
+	}
+
+	now := time.Now()
+	s.notifier.Send(notifier.Event{
+		Kind:      kind,
+		Timestamp: now,
+		Decision:  "TEST",
+		Severity:  "HIGH",
+		ClientIP:  "127.0.0.1",
+		Method:    "GET",
+		Host:      "waf.local",
+		Path:      "/__test_broadcast",
+		Reason:    "Manual broadcast test from dashboard",
+		RuleID:    "WAF-TEST-BROADCAST-" + now.Format("150405.000"),
+		Score:     7.5,
+		UserAgent: "WAF/test-broadcast",
+		RequestID: "broadcast-" + now.Format("150405.000"),
+	})
+	reply(true, "")
 }

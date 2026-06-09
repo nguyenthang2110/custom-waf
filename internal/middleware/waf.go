@@ -302,9 +302,12 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	// ========================================================================
 	// STEP 3: Rate Limiting Check
 	// ========================================================================
-	// Skip rate limiting for static assets (images, CSS, JS, fonts)
-	// This prevents legitimate page loads from being blocked while maintaining
-	// protection for API endpoints and dynamic content
+	// Rate limiting is opt-in per path: only routes configured in
+	// rate_limit.endpoint_limits engage the token bucket. An empty map =
+	// no rate limiting anywhere. The static-asset shortcut below stays as
+	// a perf optimization — it skips the endpoint-match map lookup for
+	// the high-volume CSS/JS/image traffic that operators almost never
+	// want to throttle anyway.
 	isStaticAsset := strings.HasPrefix(parsed.NormalizedPath, "/assets/") ||
 		strings.HasPrefix(parsed.NormalizedPath, "/public/") ||
 		strings.HasSuffix(parsed.NormalizedPath, ".jpg") ||

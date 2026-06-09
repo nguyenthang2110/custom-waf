@@ -1,0 +1,120 @@
+@startuml class_rule_engine
+' Class diagram: package internal/engine
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName "Times"
+skinparam defaultFontSize 14
+skinparam linetype ortho
+skinparam class {
+  BackgroundColor #FFFFFF
+  BorderColor #555555
+  ArrowColor #333333
+  ArrowThickness 1.2
+  HeaderBackgroundColor #E8F0FF
+  FontSize 14
+  AttributeFontSize 12
+  AttributeFontColor #333333
+}
+skinparam note {
+  BackgroundColor #FFFBE0
+  BorderColor #888888
+  FontSize 12
+}
+
+package "internal/engine" {
+
+  class Rule {
+    + ID : string
+    + Description : string
+    + Severity : int
+    + AnomalyScore : float64
+    + Inspect : []Selector
+    + Detect : Detect
+    + Action : Action
+    + Except : []Exception
+    + Enabled : bool
+  }
+
+  class Selector {
+    + Target : TargetKind
+    + Field : string
+    + Transforms : []Transform
+  }
+
+  enum Transform {
+    URL_DECODE
+    LOWERCASE
+    COMPRESS_WHITESPACE
+    HTML_ENTITY_DECODE
+    BASE64_DECODE
+    REMOVE_COMMENTS
+  }
+
+  class Detect {
+    + Mode : DetectMode
+    + Pattern : string
+    + Tokens : []string
+    + Proximity : int
+  }
+
+  enum DetectMode {
+    REGEX
+    TOKEN
+  }
+
+  class compiledRule {
+    - re : *regexp.Regexp
+    - once : sync.Once
+    + Compile() error
+  }
+
+  class Engine {
+    - rules : []compiledRule
+    - mlPredictor : MLPredictor
+    + Evaluate(req *ParsedRequest) Result
+    + Reload(path string) error
+  }
+
+  interface MLPredictor {
+    + Predict(text string) (Prediction, error)
+  }
+
+  class MLClientAdapter {
+    - fn : func(string) (Prediction, error)
+    + Predict(text string) (Prediction, error)
+  }
+
+  class Result {
+    + Score : float64
+    + Matches : []Match
+    + MLConsulted : bool
+  }
+
+  class Loader {
+    + Load(path string) ([]Rule, error)
+    - convertV1(raw map) Rule
+  }
+}
+
+Rule "1" *-- "*" Selector
+Selector "1" *-- "*" Transform
+Rule "1" *-- "1" Detect
+Detect ..> DetectMode
+Rule <|.. compiledRule
+Engine "1" o-- "*" compiledRule
+Engine ..> MLPredictor : depends on
+MLClientAdapter ..|> MLPredictor
+Engine ..> Result : returns
+Loader ..> Rule : produces
+
+note right of MLPredictor
+  Interface khai báo trong
+  package engine — idiom Go:
+  accept interface ở consumer,
+  return struct ở producer.
+  internal/ml.Client thỏa mãn
+  ngầm định, phá bỏ
+  import cycle.
+end note
+
+@enduml

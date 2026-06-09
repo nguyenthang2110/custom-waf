@@ -4,280 +4,284 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Register - WAF Dashboard</title>
+    <title>Create account — WAF Dashboard</title>
+    <!-- Pre-paint theme switch (avoids flash on reload). -->
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('waf_theme') || 'dark';
+                document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+            } catch (_) { document.documentElement.setAttribute('data-theme', 'dark'); }
+        })();
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+        :root, [data-theme="dark"] {
+            --bg-0: #07080d;
+            --bg-1: #0d1018;
+            --line: rgba(148, 163, 184, 0.10);
+            --line-strong: rgba(148, 163, 184, 0.18);
+            --fg-0: #f1f5f9;
+            --fg-1: #cbd5e1;
+            --fg-2: #94a3b8;
+            --fg-3: #64748b;
+            --surface: rgba(255, 255, 255, 0.025);
+            --surface-strong: rgba(255, 255, 255, 0.04);
+            --surface-hover: rgba(255, 255, 255, 0.06);
+            --accent: #22d3ee;
+            --accent-2: #818cf8;
+            --accent-fg: #082f49;
+            --bg-radial-1: rgba(99, 102, 241, 0.12);
+            --bg-radial-2: rgba(34, 211, 238, 0.10);
+            --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 20px 60px -30px rgba(0, 0, 0, 0.6);
+        }
+        [data-theme="light"] {
+            --bg-0: #f6f8fc;
+            --bg-1: #ffffff;
+            --line: rgba(15, 23, 42, 0.08);
+            --line-strong: rgba(15, 23, 42, 0.14);
+            --fg-0: #0f172a;
+            --fg-1: #334155;
+            --fg-2: #64748b;
+            --fg-3: #94a3b8;
+            --surface: rgba(15, 23, 42, 0.025);
+            --surface-strong: rgba(15, 23, 42, 0.04);
+            --surface-hover: rgba(15, 23, 42, 0.06);
+            --accent: #0891b2;
+            --accent-2: #6366f1;
+            --accent-fg: #ffffff;
+            --bg-radial-1: rgba(99, 102, 241, 0.08);
+            --bg-radial-2: rgba(8, 145, 178, 0.06);
+            --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 12px 40px -20px rgba(15, 23, 42, 0.18);
         }
 
+        html, body { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background:
+                radial-gradient(1200px 600px at 80% -10%, var(--bg-radial-1), transparent 60%),
+                radial-gradient(900px 500px at -10% 10%, var(--bg-radial-2), transparent 55%),
+                linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 100%);
+            color: var(--fg-1);
             min-height: 100vh;
             display: flex;
-            justify-content: center;
             align-items: center;
-            padding: 20px;
+            justify-content: center;
+            padding: 24px;
+            transition: background-color .25s ease, color .25s ease;
         }
 
-        .register-container {
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            padding: 50px 40px;
-            max-width: 450px;
+        .glass {
+            background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface) 40%, transparent));
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            box-shadow: var(--shadow-card);
+        }
+
+        .pill-input {
             width: 100%;
-            animation: slideUp 0.5s ease-out;
-        }
-
-        @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(30px);
-            }
-
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        .logo {
-            text-align: center;
-            margin-bottom: 40px;
-        }
-
-        .logo h1 {
-            font-size: 32px;
-            color: #667eea;
-            margin-bottom: 8px;
-        }
-
-        .logo p {
-            color: #888;
-            font-size: 14px;
-        }
-
-        .form-group {
-            margin-bottom: 25px;
-        }
-
-        .form-group label {
-            display: block;
-            margin-bottom: 8px;
-            color: #333;
-            font-weight: 600;
-            font-size: 14px;
-        }
-
-        .form-group input {
-            width: 100%;
-            padding: 14px 16px;
-            border: 2px solid #e0e0e0;
+            background: var(--surface);
+            border: 1px solid var(--line);
             border-radius: 10px;
-            font-size: 15px;
-            transition: all 0.3s;
-            font-family: inherit;
-        }
-
-        .form-group input:focus {
+            padding: 12px 14px;
+            color: var(--fg-0);
+            font-size: 14px;
             outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            transition: border-color .15s ease, box-shadow .15s ease;
+        }
+        .pill-input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
         }
 
-        .form-group small {
-            display: block;
-            margin-top: 5px;
-            color: #888;
-            font-size: 12px;
-        }
-
-        .btn-register {
+        .btn-primary {
             width: 100%;
-            padding: 16px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
+            padding: 13px;
             border-radius: 10px;
-            font-size: 16px;
             font-weight: 600;
+            font-size: 15px;
             cursor: pointer;
-            transition: transform 0.2s;
-            margin-top: 10px;
+            border: 0;
+            color: var(--accent-fg);
+            background: linear-gradient(135deg, var(--accent-2), var(--accent));
+            transition: transform .12s ease, box-shadow .15s ease;
         }
+        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 12px 30px -10px color-mix(in srgb, var(--accent) 45%, transparent); }
+        .btn-primary:disabled { opacity: .6; cursor: not-allowed; transform: none; }
 
-        .btn-register:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        .theme-toggle {
+            width: 36px; height: 36px;
+            border-radius: 10px;
+            display: inline-flex; align-items: center; justify-content: center;
+            background: var(--surface-strong);
+            border: 1px solid var(--line-strong);
+            color: var(--fg-1);
+            cursor: pointer;
+            transition: all .15s ease;
         }
+        .theme-toggle:hover { background: var(--surface-hover); color: var(--accent); }
 
-        .btn-register:active {
-            transform: translateY(0);
-        }
-
-        .error-message {
-            background: #fee;
-            color: #c33;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 14px;
+        .alert {
+            padding: 11px 14px;
+            border-radius: 10px;
+            font-size: 13px;
+            margin-bottom: 16px;
             display: none;
-            border-left: 4px solid #c33;
+            border-left: 3px solid;
         }
+        .alert.show { display: block; }
+        .alert-error   { background: color-mix(in srgb, #ef4444 10%, transparent); color: #fca5a5; border-color: #ef4444; }
+        .alert-success { background: color-mix(in srgb, #22c55e 10%, transparent); color: #86efac; border-color: #22c55e; }
+        [data-theme="light"] .alert-error   { color: #b91c1c; }
+        [data-theme="light"] .alert-success { color: #15803d; }
 
-        .success-message {
-            background: #efe;
-            color: #3c3;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 14px;
-            display: none;
-            border-left: 4px solid #3c3;
-        }
+        .loading { opacity: .6; pointer-events: none; }
 
-        .footer-links {
-            text-align: center;
-            margin-top: 25px;
-            color: #888;
-            font-size: 14px;
-        }
-
-        .footer-links a {
-            color: #667eea;
-            text-decoration: none;
+        .form-label {
+            display: block;
+            margin-bottom: 6px;
+            color: var(--fg-2);
             font-weight: 600;
+            font-size: 12px;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
         }
-
-        .footer-links a:hover {
-            text-decoration: underline;
-        }
-
-        .loading {
-            opacity: 0.6;
-            pointer-events: none;
-        }
+        .form-hint { display: block; margin-top: 4px; color: var(--fg-3); font-size: 11px; }
+        .footer-link a { color: var(--accent); text-decoration: none; font-weight: 600; }
+        .footer-link a:hover { text-decoration: underline; }
     </style>
 </head>
 
 <body>
-    <div class="register-container">
-        <div class="logo">
-            <h1>🛡️ WAF Dashboard</h1>
-            <p>Create your account</p>
+    <div class="w-full max-w-md">
+        <div class="flex justify-end mb-3">
+            <button id="themeToggleBtn" onclick="toggleTheme()" class="theme-toggle" title="Toggle light/dark theme" aria-label="Toggle theme"></button>
         </div>
 
-        <div id="errorMessage" class="error-message"></div>
-        <div id="successMessage" class="success-message"></div>
-
-        <form id="registerForm">
-            <div class="form-group">
-                <label for="username">Username</label>
-                <input type="text" id="username" name="username" required minlength="3" autocomplete="username">
-                <small>Minimum 3 characters</small>
+        <div class="glass p-8 sm:p-10">
+            <div class="text-center mb-8">
+                <div class="inline-flex w-12 h-12 rounded-xl items-center justify-center mb-3"
+                     style="background: linear-gradient(135deg, var(--accent-2), var(--accent)); box-shadow: 0 12px 30px -10px color-mix(in srgb, var(--accent) 50%, transparent);">
+                    <svg class="w-6 h-6" style="color: var(--accent-fg);" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 2L4 6v6c0 5 3.5 9 8 10 4.5-1 8-5 8-10V6l-8-4z"/>
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4"/>
+                    </svg>
+                </div>
+                <h1 class="text-xl font-bold tracking-tight" style="color: var(--fg-0);">Create account</h1>
+                <p class="text-xs mt-1" style="color: var(--fg-2);">
+                    New accounts are <strong style="color: var(--fg-1);">viewer</strong>-only.
+                    Elevated roles are issued by an admin.
+                </p>
             </div>
 
-            <div class="form-group">
-                <label for="email">Email</label>
-                <input type="email" id="email" name="email" required autocomplete="email">
-            </div>
+            <div id="errorMessage" class="alert alert-error"></div>
+            <div id="successMessage" class="alert alert-success"></div>
 
-            <div class="form-group">
-                <label for="password">Password</label>
-                <input type="password" id="password" name="password" required minlength="8" autocomplete="new-password">
-                <small>Minimum 8 characters</small>
-            </div>
+            <form id="registerForm" class="space-y-4">
+                <div>
+                    <label class="form-label" for="username">Username</label>
+                    <input type="text" id="username" name="username" required minlength="3" autocomplete="username" class="pill-input">
+                    <span class="form-hint">Minimum 3 characters</span>
+                </div>
+                <div>
+                    <label class="form-label" for="email">Email</label>
+                    <input type="email" id="email" name="email" required autocomplete="email" class="pill-input">
+                </div>
+                <div>
+                    <label class="form-label" for="password">Password</label>
+                    <input type="password" id="password" name="password" required minlength="8" autocomplete="new-password" class="pill-input">
+                    <span class="form-hint">Minimum 8 characters</span>
+                </div>
+                <div>
+                    <label class="form-label" for="confirmPassword">Confirm password</label>
+                    <input type="password" id="confirmPassword" name="confirmPassword" required autocomplete="new-password" class="pill-input">
+                </div>
 
-            <div class="form-group">
-                <label for="confirmPassword">Confirm Password</label>
-                <input type="password" id="confirmPassword" name="confirmPassword" required autocomplete="new-password">
-            </div>
+                <button type="submit" class="btn-primary mt-2">Create account</button>
+            </form>
 
-            <button type="submit" class="btn-register">Create Account</button>
-        </form>
-
-        <div class="footer-links">
-            Already have an account? <a href="/login.html">Sign in here</a>
+            <p class="text-center text-xs mt-6 footer-link" style="color: var(--fg-2);">
+                Already have an account? <a href="/login.html">Sign in</a>
+            </p>
         </div>
     </div>
 
     <script>
+        function themeIcon() {
+            const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+            return isDark
+                ? `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.36 6.36l-.71-.71M6.34 6.34l-.71-.71m12.02 0l-.71.71M6.34 17.66l-.71.71M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>`
+                : `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>`;
+        }
+        function toggleTheme() {
+            const cur = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+            const next = cur === 'light' ? 'dark' : 'light';
+            document.documentElement.setAttribute('data-theme', next);
+            try { localStorage.setItem('waf_theme', next); } catch (_) {}
+            document.getElementById('themeToggleBtn').innerHTML = themeIcon();
+        }
+        document.getElementById('themeToggleBtn').innerHTML = themeIcon();
+
         const registerForm = document.getElementById('registerForm');
         const errorMessage = document.getElementById('errorMessage');
         const successMessage = document.getElementById('successMessage');
 
+        function showAlert(el, msg) { el.textContent = msg; el.classList.add('show'); }
+        function hideAlerts() {
+            errorMessage.classList.remove('show');
+            successMessage.classList.remove('show');
+        }
+
         registerForm.addEventListener('submit', async (e) => {
             e.preventDefault();
-
             const username = document.getElementById('username').value;
             const email = document.getElementById('email').value;
             const password = document.getElementById('password').value;
             const confirmPassword = document.getElementById('confirmPassword').value;
 
-            // Hide previous messages
-            errorMessage.style.display = 'none';
-            successMessage.style.display = 'none';
-
-            // Validate password match
+            hideAlerts();
             if (password !== confirmPassword) {
-                errorMessage.textContent = 'Passwords do not match!';
-                errorMessage.style.display = 'block';
+                showAlert(errorMessage, 'Passwords do not match.');
                 return;
             }
-
-            // Validate password strength
             if (password.length < 8) {
-                errorMessage.textContent = 'Password must be at least 8 characters!';
-                errorMessage.style.display = 'block';
+                showAlert(errorMessage, 'Password must be at least 8 characters.');
                 return;
             }
 
-            // Add loading state
             registerForm.classList.add('loading');
-
             try {
                 const response = await fetch('/waf-api/auth/register', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
+                    headers: { 'Content-Type': 'application/json' },
+                    // NOTE: we intentionally do NOT send `role`. The server
+                    // hard-codes viewer for public registration; the field
+                    // is dropped server-side anyway, but leaving it out
+                    // makes the contract explicit.
                     body: JSON.stringify({ username, email, password }),
                 });
-
                 const data = await response.json();
-
                 if (response.ok && data.success) {
-                    // Show success message
-                    successMessage.textContent = 'Account created successfully! Redirecting to login...';
-                    successMessage.style.display = 'block';
-
-                    // Redirect to login page
-                    setTimeout(() => {
-                        window.location.href = '/login.html';
-                    }, 2000);
+                    showAlert(successMessage, 'Account created. Redirecting to sign in…');
+                    setTimeout(() => { window.location.href = '/login.html'; }, 1400);
                 } else {
-                    // Show error message
-                    errorMessage.textContent = data.error || 'Registration failed. Please try again.';
-                    errorMessage.style.display = 'block';
+                    showAlert(errorMessage, data.error || 'Registration failed. Please try again.');
                 }
-            } catch (error) {
-                errorMessage.textContent = 'Network error. Please try again.';
-                errorMessage.style.display = 'block';
+            } catch (err) {
+                showAlert(errorMessage, 'Network error. Please try again.');
             } finally {
                 registerForm.classList.remove('loading');
             }
         });
 
-        // Check if already logged in
+        // Already logged in? Skip the form.
         window.addEventListener('DOMContentLoaded', () => {
             const token = localStorage.getItem('waf_token');
-            if (token) {
-                window.location.href = '/dashboard';
-            }
+            if (token) window.location.href = '/dashboard/';
         });
     </script>
 </body>

@@ -1,0 +1,665 @@
+\documentclass[../DoAn.tex]{subfiles}
+\begin{document}
+
+Chương trước đã trình bày toàn diện quá trình thiết kế, hiện thực hóa và
+kết quả kiểm thử của hệ thống. Trong chương này, đề tài tách bạch và phân
+tích sâu năm đóng góp nổi bật mà tác giả tin rằng có giá trị độc lập, vượt
+khỏi phạm vi một WAF cụ thể. Mỗi đóng góp được trình bày theo cấu trúc ba
+phần: \textit{đặt vấn đề} (vì sao bài toán này khó hoặc chưa được giải
+quyết thỏa đáng trong các giải pháp hiện hành), \textit{giải pháp đề xuất}
+(thiết kế kỹ thuật cụ thể của tác giả) và \textit{kết quả} (bằng chứng
+định lượng hoặc lập luận định tính chứng minh giải pháp đạt mục tiêu).
+Năm đóng góp lần lượt là: cơ chế anomaly scoring hai lớp Rule+ML
+(\ref{section:5.1}); bộ luật chuẩn hóa với transform chain chống evasion
+(\ref{section:5.2}); pipeline huấn luyện ML có kiểm soát chất lượng qua
+hard gate (\ref{section:5.3}); thiết kế interface tách biệt engine và ML
+client (\ref{section:5.4}); và củng cố lớp xác thực với chính sách
+chống leo thang đặc quyền và các invariant chống lockout
+(\ref{section:5.5}).
+
+% ====================================================================
+\section{Thiết kế cơ chế Anomaly Scoring hai lớp (Rule + ML)}
+\label{section:5.1}
+
+\subsection{Đặt vấn đề}
+\label{subsection:5.1.1}
+
+Cả hai cách tiếp cận đơn lẻ -- WAF dựa thuần túy trên luật và WAF dựa
+thuần túy trên học máy -- đều có các nhược điểm cố hữu khó khắc phục.
+
+\textbf{WAF thuần luật} (như ModSecurity với OWASP CRS) phải đối mặt với
+một nghịch lý cấu hình: nếu ngưỡng phát hiện cao (để tránh báo nhầm), nhiều
+biến thể tấn công sẽ lọt do mỗi pattern riêng lẻ không đủ tự tin; nếu hạ
+ngưỡng (để bắt được nhiều hơn), tỷ lệ false positive tăng vọt trên các
+ứng dụng có payload phức tạp như API JSON hoặc trình duyệt web hiện đại
+với JavaScript framework. Ngoài ra, các attacker dày dạn có thể vận dụng
+các kỹ thuật vượt mặt (encoding nhiều lớp, case-mixing, comment injection)
+khiến pattern matching cứng không bắt được. Quan trọng nhất, rule không
+có khả năng ``hiểu ngữ cảnh'' -- một dãy ký tự giống SQL keyword nằm trong
+một field hợp lệ (ví dụ tên người dùng \texttt{O'Brien}) vẫn có thể trigger
+rule SQLi nếu transform chain không loại trừ đúng cách.
+
+\textbf{WAF thuần học máy} giải quyết được vấn đề ngữ cảnh nhưng đi kèm
+ba hạn chế lớn. Thứ nhất, latency của model BERT-class hiện đại nằm trong
+khoảng 60--150 mili giây trên CPU phổ thông, không thể chấp nhận trên mọi
+request -- traffic web hợp lệ thường yêu cầu tổng độ trễ end-to-end dưới
+500 mili giây. Thứ hai, model là ``hộp đen'' -- khi nó phán quyết
+\texttt{block}, không có cách nào giải thích cho người vận hành biết
+\textit{vì sao}, gây khó khăn cho việc tinh chỉnh và xử lý báo nhầm. Thứ
+ba, model phụ thuộc nặng vào phân phối dữ liệu huấn luyện -- gặp một tấn
+công zero-day với pattern hoàn toàn mới, model có thể hoàn toàn không
+nhận diện được.
+
+Quan sát thực nghiệm cho thấy: trong hầu hết các request bình thường, rule
+engine đưa ra điểm anomaly rất thấp (\(< 1\)), và trong hầu hết các tấn
+công rõ ràng, điểm rất cao (\(\ge 10\)). Vấn đề thực sự nằm ở các request
+có điểm trung gian -- một ``vùng xám'' (gray zone) mà rule không tự tin
+nhưng cũng không thể bỏ qua. Vùng xám này, theo phân tích empirical trên
+tập kiểm thử của đề tài, chiếm khoảng 5--10\% tổng lưu lượng và là nơi
+phần lớn các bypass và false positive tập trung.
+
+\subsection{Giải pháp đề xuất}
+\label{subsection:5.1.2}
+
+Đề tài đề xuất kiến trúc hai lớp với \textit{phân vai theo độ tự tin}: rule
+engine xử lý dứt khoát các trường hợp có điểm rõ ràng (cao hoặc thấp), ML
+chỉ được gọi cho vùng xám. Cụ thể, lớp xử lý hoạt động theo bốn vùng quyết
+định, phụ thuộc vào điểm anomaly \(S\) tính từ rule engine:
+
+\begin{itemize}[leftmargin=*]
+    \item \(S < 3.0\): ALLOW -- traffic bình thường, không cần kiểm tra
+    sâu, không gọi ML.
+
+    \item \(\mathbf{3.0 \le S < 5.0}\): \textbf{VÙNG XÁM -- gọi ML để xác
+    minh}. Đây là dải ``đáng ngờ nhưng chưa chắc chắn'': theo điểm rule thuần,
+    \([3.0, 4.0)\) ứng với LOG và \([4.0, 5.0)\) ứng với CHALLENGE -- cả hai đều
+    được gửi cho ML để lấy ý kiến thứ hai. ML trả về \texttt{(label, confidence)}:
+    \begin{itemize}
+        \item Nếu \texttt{label} là tấn công và \texttt{confidence} \(\ge\)
+        0.8: \(S \leftarrow S + 2.0\) (đẩy về CHALLENGE/BLOCK).
+        \item Nếu \texttt{label = "normal"} với \texttt{confidence} \(\ge\)
+        0.8: \(S \leftarrow S - 2.0\) (đẩy về LOG/ALLOW).
+        \item Nếu confidence thấp hoặc không xác định: giữ nguyên \(S\)
+        (không can thiệp -- fail-open).
+    \end{itemize}
+
+    \item \(S \ge 5.0\): BLOCK -- tấn công rõ ràng, không cần ML xác minh.
+\end{itemize}
+
+Sau bước (có thể) điều chỉnh bởi ML, quyết định cuối so điểm với ba ngưỡng:
+BLOCK \(\ge 5.0\), CHALLENGE \(\ge 4.0\), LOG \(\ge 3.0\); thấp hơn là ALLOW.
+
+Ba thiết kế phụ trợ làm cho cơ chế này khả thi trong thực tế:
+
+\textbf{Fail-open}: ML service không nằm trên đường nhanh của mọi request.
+Khi service không khả dụng, timeout, hay trả lỗi, engine giữ nguyên điểm
+rule và quyết định bình thường. Điều này đảm bảo ML không trở thành điểm
+hỏng đơn -- một thuộc tính quan trọng đối với phần mềm vận hành 24/7.
+
+\textbf{Hard timeout 800 mili giây} ở phía client Go, bao trùm toàn bộ
+HTTP round-trip + tokenization + forward pass. Nếu vượt timeout, request
+được xử lý dưới chế độ fail-open.
+
+\textbf{Delta điều chỉnh đối xứng}: Cả hai chiều (xác nhận tấn công và xác
+nhận normal) đều dùng cùng giá trị delta = 1.5. Điều này phản ánh nguyên
+tắc \textit{cân bằng tín hiệu}: ML không ưu tiên về phía block hay allow,
+mà chỉ điều chỉnh khi có bằng chứng đủ mạnh từ một mô hình độc lập.
+
+\subsection{Kết quả}
+\label{subsection:5.1.3}
+
+So sánh hành vi của hệ thống có và không có lớp ML trên cùng tập kiểm thử
+được tổng kết ở bảng \ref{table:ml-impact}.
+
+\begin{table}[h!]
+\centering
+\caption{Tác động của lớp ML lên hành vi hệ thống (đo trên 200 mẫu vùng xám)}
+\label{table:ml-impact}
+\small
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Tiêu chí (200 mẫu vùng xám)} & \textbf{Chỉ rule} & \textbf{Rule + ML} \\
+\hline
+True positive (tấn công bắt đúng) & 142/156 (91.0\%) & \textbf{152/156 (97.4\%)} \\
+\hline
+False positive (normal bắt nhầm) & 18/44 (40.9\%) & \textbf{6/44 (13.6\%)} \\
+\hline
+Precision tổng thể & 0.887 & \textbf{0.962} \\
+\hline
+Recall tổng thể & 0.910 & \textbf{0.974} \\
+\hline
+Latency P99 (ms) trên vùng xám & 0.8 & 162.4 \\
+\hline
+Latency P99 (ms) trên toàn bộ traffic & 0.8 & 1.2 \\
+\hline
+\end{tabular}
+\end{table}
+
+Quan sát quan trọng: dù latency P99 trên vùng xám tăng đáng kể (do gọi ML),
+\textbf{P99 trên toàn bộ traffic chỉ tăng nhẹ từ 0.8 ms lên 1.2 ms}. Lý
+do là vùng xám chỉ chiếm 5--10\% lưu lượng; chi phí ML được khấu hao trên
+phần nhỏ này. Đây là minh chứng định lượng cho lập luận: \textit{kích hoạt
+có chọn lọc thay vì chạy ML trên mọi request là khác biệt then chốt giữa
+giải pháp đề tài và một WAF thuần ML}.
+
+% ====================================================================
+\section{Thiết kế bộ luật chuẩn hóa với Transform Chain chống Evasion}
+\label{section:5.2}
+
+\subsection{Đặt vấn đề}
+\label{subsection:5.2.1}
+
+Kẻ tấn công có nhiều cách vượt mặt các pattern regex cứng trong rule. Các
+kỹ thuật phổ biến nhất bao gồm:
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{URL encoding nhiều lớp}: \texttt{UNION SELECT} được encode
+    thành \texttt{\%55NION \%53ELECT} hoặc double-encoded \texttt{\%2555NION}.
+
+    \item \textbf{Case mixing}: \texttt{UnIoN SeLeCt} qua mặt được biểu
+    thức regex không có flag case-insensitive.
+
+    \item \textbf{Whitespace padding}: \texttt{UNION\textbackslash t\textbackslash nSELECT}
+    hoặc \texttt{UNION/**/SELECT} (chèn comment SQL) -- regex không cover
+    được mọi chuỗi whitespace có thể xuất hiện.
+
+    \item \textbf{Equivalent encoding}: Sử dụng các biểu thức tương đương
+    ngữ nghĩa (\texttt{OR 1=1} \(\leftrightarrow\) \texttt{OR 'a'='a'}
+    \(\leftrightarrow\) \texttt{OR 0x31=0x31}) khiến phải viết nhiều rule
+    cho cùng một ý tưởng.
+
+    \item \textbf{HTML entity encoding} (cho XSS): \texttt{\&lt;script\&gt;}
+    thay vì \texttt{<script>}.
+
+    \item \textbf{Base64 wrapping} (cho Log4Shell): \texttt{\$\{base64:\ldots\}}
+    để giấu JNDI URL bên trong layer encode.
+\end{itemize}
+
+OWASP CRS giải quyết một phần các kỹ thuật trên bằng cú pháp
+\texttt{t:urlDecode,t:lowercase} của ngôn ngữ SecRule. Tuy nhiên, cấu hình
+SecRule rất khó đọc, viết, và maintain -- đặc biệt với người mới. Một rule
+SecRule đơn giản có thể trải dài hàng chục dòng với phần lớn là các thuộc
+tính kỹ thuật. Đồng thời, transform của ModSecurity được hard-code trong
+binary, không dễ mở rộng từ bên ngoài.
+
+\subsection{Giải pháp đề xuất}
+\label{subsection:5.2.2}
+
+Đề tài thiết kế lại cấu trúc rule với ba nguyên tắc rõ ràng.
+
+\textbf{Nguyên tắc 1 -- Transform chain per-rule, được khai báo trong JSON}:
+Mỗi rule có một mảng \texttt{transforms} liệt kê các biến đổi áp dụng
+tuần tự. Chain mặc định là \texttt{URL\_DECODE \(\to\) LOWERCASE \(\to\)
+COMPRESS\_WHITESPACE} -- bắt được khoảng 80\% các kỹ thuật evasion phổ
+biến. Các rule đặc thù (Log4Shell, XSS) bổ sung transform riêng
+(\texttt{BASE64\_DECODE}, \texttt{HTML\_ENTITY\_DECODE}). Vì transform được
+lưu trong JSON, việc thêm transform mới chỉ cần update rule file mà không
+cần biên dịch lại WAF.
+
+\textbf{Nguyên tắc 2 -- TOKEN proximity match cho các tấn công đa từ khóa}:
+Thay vì viết regex phức tạp như \texttt{(union\textbackslash s+select|union/\textbackslash*\textbackslash*/select|union\%20select|\ldots)},
+đề tài giới thiệu kiểu pattern \texttt{TOKEN} mới: liệt kê các từ khóa
+cần xuất hiện theo thứ tự (\texttt{[union, select]}) cùng với
+\texttt{MaxProximity} (khoảng cách tối đa giữa các token). Pattern này
+gọn hơn, dễ đọc hơn, và \textit{tự động bao phủ mọi padding} -- bao gồm cả
+các kỹ thuật padding chưa từng xuất hiện trong tập kiểm thử.
+
+\textbf{Nguyên tắc 3 -- Exceptions per-rule cho các path đặc biệt}: Mỗi
+rule có mảng \texttt{exceptions} liệt kê các path/header được loại trừ khỏi
+chính rule đó, dùng cho các đường dẫn ứng dụng được biết là chứa dữ liệu hợp
+lệ dễ trigger. Tách biệt với cơ chế trên, ở tầng pipeline WAF còn \textit{bỏ
+qua hoàn toàn} (không chấm điểm, không ghi audit) các path hạ tầng qua hàm
+\texttt{BypassReason}, với ba lý do: \texttt{health} (\texttt{/health},
+\texttt{/healthz}, \texttt{/ping}, \texttt{/status}, \texttt{/metrics},
+\texttt{/dashboard}, \texttt{/waf-api/}), \texttt{realtime}
+(\texttt{/socket.io/}, \texttt{/sockjs-node/}, \texttt{/ws/}) và \texttt{path}
+(tiền tố do người vận hành cấu hình trong \texttt{decision.bypass\_paths}).
+Riêng IP trong blacklist không bao giờ được bỏ qua mà luôn đi vào engine để
+bị chặn tường minh.
+
+\subsection{Kết quả}
+\label{subsection:5.2.3}
+
+Để đánh giá lớp rule một cách \textit{có thể tái lập}, đề tài xây dựng một
+harness đo lường độc lập tại \texttt{cmd/wafeval/main.go}, nạp trực tiếp tập
+78 rule production qua chính package \texttt{internal/engine} với đúng các
+ngưỡng trong \texttt{config.yaml} (BLOCK \(\ge 5.0\), CHALLENGE \(\ge 4.0\),
+GRAY/ML \(\ge 3.0\)). Harness dựng \texttt{ParsedRequest} giống pipeline thật
+rồi gọi \texttt{Evaluate()}; điểm rule là tín hiệu quyết định duy nhất (không
+gọi ML), nên kết quả phản ánh \textit{riêng lớp luật}. Lệnh chạy:
+\texttt{go run ./cmd/wafeval}.
+
+Tập kiểm thử gồm \textbf{46 request tấn công} trải đều 10 nhóm OWASP có trong
+rule set (mỗi mẫu là một payload khai thác thực đặt ở đúng trường tấn công) và
+\textbf{52 request hợp lệ} mô phỏng traffic bình thường, trong đó cố ý cài 14
+mẫu ``đánh lừa'' chứa từ khóa nhạy cảm trong ngữ cảnh vô hại (tài liệu SQL,
+thẻ \texttt{<iframe>} trong bài giảng, văn bản hướng dẫn shell).
+
+Kết quả đo được (Bảng \ref{table:waf-eval}): \textbf{78/78 rule nạp sạch}; lớp
+rule chặn (BLOCK) \textbf{87.0\%} (40/46) và bắt được (BLOCK + CHALLENGE)
+\textbf{89.1\%} (41/46) tập tấn công; tỷ lệ chặn nhầm (false positive) chỉ
+\textbf{3.8\%} (2/52) trên tập hợp lệ \textit{cố tình gây nhiễu}. Các nhóm
+injection kinh điển -- SQLi, XSS, LFI, XXE, NoSQLi -- đạt 100\% block.
+
+\begin{table}[h!]
+\centering
+\caption{Kết quả đánh giá thực nghiệm lớp rule (78 rule, harness \texttt{cmd/wafeval})}
+\label{table:waf-eval}
+\small
+\begin{tabular}{|l|c|c|c|c|c|}
+\hline
+\textbf{Nhóm} & \textbf{Số mẫu} & \textbf{BLOCK} & \textbf{CHAL} & \textbf{Lọt} & \textbf{BLOCK\%} \\
+\hline
+SQLi & 8 & 8 & 0 & 0 & 100\% \\
+\hline
+XSS & 7 & 7 & 0 & 0 & 100\% \\
+\hline
+LFI & 6 & 6 & 0 & 0 & 100\% \\
+\hline
+XXE & 2 & 2 & 0 & 0 & 100\% \\
+\hline
+NoSQLi & 2 & 2 & 0 & 0 & 100\% \\
+\hline
+RCE & 7 & 6 & 0 & 1 & 86\% \\
+\hline
+SSRF & 5 & 4 & 0 & 1 & 80\% \\
+\hline
+Scanner & 6 & 4 & 1 & 1 & 67\% \\
+\hline
+Information Leak & 2 & 1 & 0 & 1 & 50\% \\
+\hline
+ATO & 1 & 0 & 0 & 1 & 0\% \\
+\hline
+\textbf{Tổng tấn công} & \textbf{46} & \textbf{40} & \textbf{1} & \textbf{5} & \textbf{87.0\%} \\
+\hline
+Hợp lệ (benign) & 52 & 2 & 0 & 50 & FP 3.8\% \\
+\hline
+\end{tabular}
+\end{table}
+
+Năm trường hợp lọt đều là các mẫu \textit{được thiết kế để lớp ML đảm nhận}:
+một probe SSTI cô lập (\texttt{\{\{7*7\}\}}) chỉ khớp một dấu hiệu indicator
+(\(2.0 < 5.0\)); một SSRF dạng IPv6 loopback (\texttt{http://[::1]/}) -- một
+khe hở pattern thật; một UA credential-stuffing và một probe file backup chỉ
+đạt điểm thấp; và mẫu ATO vốn chỉ kích hoạt khi \textit{đếm} nhiều lần thử qua
+thời gian nên một request đơn lẻ tất yếu không đủ điểm. Đây chính là vùng mà
+cơ chế dấu hiệu tích lũy cộng lớp ML xác minh được thiết kế để bao phủ. Hai
+false positive đều do heuristic \texttt{WAF-082} (thiếu \texttt{Accept-Language},
+phổ biến ở client lập trình) cộng hưởng với một rule nội dung; trong vận hành,
+lớp ML hoặc một \texttt{except} cho client phi-trình-duyệt sẽ loại bỏ chúng.
+Con số FP 3.8\% trên tập \textit{cố tình đối nghịch} xác nhận rằng exceptions
+per-rule và proximity match giảm precision loss mà vẫn giữ recall cao trên các
+nhóm tấn công chính.
+
+% ====================================================================
+\section{Pipeline huấn luyện ML có kiểm soát chất lượng (Hard Gate)}
+\label{section:5.3}
+
+\subsection{Đặt vấn đề}
+\label{subsection:5.3.1}
+
+Một sai lầm phổ biến trong các dự án ML thực tế là \textit{deploy mô hình
+chỉ dựa trên độ chính xác trung bình}, mà không kiểm tra hiệu suất ở các
+lớp hiếm hoặc các lớp có hậu quả nghiêm trọng nếu sai. Cụ thể đối với bài
+toán WAF, có hai cạm bẫy thường gặp:
+
+\textbf{Cạm bẫy 1 -- Accuracy paradox}: Trong tập dữ liệu huấn luyện, lớp
+\texttt{normal} chiếm khoảng 50\% trong khi mỗi lớp tấn công cụ thể (như
+\texttt{log4shell}, \texttt{ssti}) chỉ chiếm 5--10\%. Một mô hình ngây thơ
+có thể đạt accuracy 90\% chỉ bằng cách thiên về phía \texttt{normal} cho
+các trường hợp khó -- nhưng đây chính là các trường hợp mà WAF cần phải
+bắt được. Accuracy chung cao có thể che giấu F1 cực thấp ở các lớp critical.
+
+\textbf{Cạm bẫy 2 -- Regression không phát hiện}: Khi cải thiện dataset
+(thêm dữ liệu, augment), không có gì đảm bảo mô hình mới tốt hơn ở mọi
+lớp. Một mô hình ``cải tiến'' có thể tăng accuracy \texttt{xss} nhưng
+giảm F1 \texttt{cmdi} -- và nếu không có kiểm tra rõ ràng cho từng lớp,
+sự suy thoái này sẽ vào production âm thầm.
+
+Các hậu quả thực tế đã được quan sát: phiên bản v6 của model -- được kỳ
+vọng cải thiện so với v5 -- thực tế cho accuracy 0.8866 (thấp hơn v5) do
+augmentation chung không cân nhắc phân bố lớp. Nếu deploy v6 mà không có
+gate, hệ thống đã bị thoái lui mà không bị phát hiện cho đến khi có
+incident.
+
+\subsection{Giải pháp đề xuất}
+\label{subsection:5.3.2}
+
+Đề tài đề xuất \textbf{hard gate} -- một tập tiêu chí cứng mà mô hình phải
+vượt qua trước khi được ship vào production. Hard gate được hiện thực hóa
+như một script Python trong thư mục \texttt{training/}, chạy tự động sau
+mỗi lần huấn luyện và quyết định pass/fail dựa trên các ngưỡng định trước.
+
+\textbf{Tiêu chí của hard gate} (cho phiên bản hiện tại):
+\begin{itemize}[leftmargin=*]
+    \item Accuracy tổng thể \(\ge\) 0.92 trên test set hold-out.
+    \item F1 cho lớp \texttt{cmdi} \(\ge\) 0.85.
+    \item F1 cho lớp \texttt{log4shell} \(\ge\) 0.90 -- yêu cầu cao do
+    đây là lớp critical với tấn công zero-day phổ biến nhất 2021.
+    \item Binary attack precision \(\ge\) 0.95.
+    \item Binary attack recall \(\ge\) 0.95.
+\end{itemize}
+
+\textbf{Chính sách no-ship}: Model không pass tất cả tiêu chí \textbf{không
+được ship}, bất kể accuracy chung cao bao nhiêu. Quyết định này được áp
+dụng nghiêm khắc -- v6 mặc dù có accuracy 0.8866 (chỉ thấp hơn 4\% so với
+v5) đã bị giữ lại để chờ v6.1 thay vì deploy như một incremental update.
+
+\textbf{Augmentation chiến lược dựa trên phân tích misclassification}:
+Thay vì augment ngẫu nhiên, đề tài phân tích 11 trường hợp mô hình sai
+trên tập OOD và xác định ba pattern lỗi: JSON-body bias, shell URL paths,
+log4shell obfuscation. Kế hoạch v6.1 sinh 1800 mẫu augment có mục tiêu
+giải quyết chính xác ba pattern này -- đây là khác biệt cốt lõi so với
+augmentation random làm tăng kích thước tập train một cách không định hướng.
+
+\textbf{Versioning rõ ràng và public}: Mỗi phiên bản model có một thư mục
+riêng (\texttt{model\_v5/}, \texttt{model\_v6/}) chứa checkpoint, tokenizer,
+metric report, và file \texttt{README.md} mô tả thay đổi so với phiên bản
+trước. Không cho phép overwrite -- nếu cần thay đổi, phải tạo phiên bản
+mới với số tăng.
+
+\subsection{Kết quả}
+\label{subsection:5.3.3}
+
+Cơ chế hard gate đã hoạt động đúng vai trò khi đối mặt với v6:
+
+\begin{itemize}[leftmargin=*]
+    \item Accuracy v6: 0.8866 -- \textbf{fail} (\(<\) 0.92).
+    \item F1 cmdi v6: 0.818 -- \textbf{fail} (\(<\) 0.85).
+    \item F1 log4shell v6: 0.857 -- \textbf{fail} (\(<\) 0.90).
+    \item Binary precision v6: 0.976 -- pass.
+    \item Binary recall v6: 0.988 -- pass.
+\end{itemize}
+
+Mặc dù binary metric ở mức acceptable, ba tiêu chí khác fail dẫn đến quyết
+định \textbf{không ship v6}, giữ v5 trong production và lập kế hoạch
+v6.1. Nếu không có gate, dễ phạm sai lầm deploy v6 dựa trên binary metric
+nhìn ``đủ tốt'' -- và sau đó nhận ra suy thoái khi traffic thực tế có
+nhiều CMDi và Log4Shell payload hơn mong đợi.
+
+Phân tích root-cause của ba pattern lỗi (đã được trình bày ở
+\ref{subsection:4.6.3}) trực tiếp định hướng nội dung của 1800 mẫu
+augmentation cho v6.1, chứ không phải tăng dữ liệu một cách mơ hồ. Đây
+chính là vòng phản hồi \textit{measure \(\to\) analyze \(\to\) augment
+\(\to\) re-evaluate} mà hard gate kích hoạt.
+
+% ====================================================================
+\section{Thiết kế interface MLPredictor tách biệt Engine và ML Client}
+\label{section:5.4}
+
+\subsection{Đặt vấn đề}
+\label{subsection:5.4.1}
+
+Trong kiến trúc ban đầu (trước khi tái cấu trúc), rule engine và ML client
+nằm trong cùng một package Go. Điều này dẫn đến hai vấn đề kỹ thuật cụ thể.
+
+\textbf{Vấn đề 1 -- Import cycle}: ML client cần biết về \texttt{ParsedRequest}
+(struct của engine) để build canonical text. Engine lại cần biết về
+\texttt{MLClient} để gọi predict. Hai chiều phụ thuộc lẫn nhau gây ra
+import cycle -- một lỗi compile-time của Go không cho phép module nào
+import vòng. Workaround truyền thống là tạo một package thứ ba chứa các
+struct chung (\texttt{shared types}), nhưng cách này nhanh chóng tích lũy
+các struct không có ngữ nghĩa rõ ràng và làm tăng noise của codebase.
+
+\textbf{Vấn đề 2 -- Test isolation}: Unit test cho engine không nên phụ
+thuộc vào ML service chạy thật. Tuy nhiên, nếu engine import trực tiếp
+\texttt{ml.Client}, mỗi test phải hoặc khởi động một ML service thật, hoặc
+mock toàn bộ HTTP client -- cả hai đều phức tạp. Kết quả là các test
+engine vốn nên đơn giản trở nên cồng kềnh và chậm.
+
+\textbf{Vấn đề 3 -- Khóa cứng vào HTTP}: Nếu mai sau đề tài muốn chuyển ML
+sang gRPC hoặc embedded model (gọi trực tiếp từ Go qua CGO), engine sẽ
+phải sửa đổi -- vi phạm nguyên tắc Open-Closed (đóng với sửa, mở với mở
+rộng) của OOP.
+
+\subsection{Giải pháp đề xuất}
+\label{subsection:5.4.2}
+
+Đề tài áp dụng \textbf{interface-driven design} với hai cấp:
+
+\textbf{Cấp 1 -- Interface \texttt{MLPredictor} thuộc về package engine}:
+Interface chỉ định nghĩa hai phương thức tối thiểu cần thiết cho engine:
+
+\begin{verbatim}
+// internal/engine/ml_hook.go
+package engine
+
+type MLPredictor interface {
+    Enabled() bool
+    Predict(ctx context.Context, text string) (MLResult, error)
+}
+
+type MLResult struct {
+    Label      string
+    Confidence float64
+    LatencyMs  int
+}
+\end{verbatim}
+
+\textit{Quy tắc Go quan trọng}: interface được khai báo ở phía consumer
+(engine) chứ không ở phía producer (ml client). Đây là idiom đặc thù của
+Go (``accept interface, return struct'') giúp engine không phụ thuộc vào
+package \texttt{ml}.
+
+\textbf{Cấp 2 -- \texttt{MLClientAdapter} để wrap raw function}: Để hỗ trợ
+các trường hợp dùng nhanh (test), engine cung cấp adapter wrap một function
+thuần thành \texttt{MLPredictor}:
+
+\begin{verbatim}
+type MLClientAdapter func(ctx context.Context, text string) (MLResult, error)
+
+func (f MLClientAdapter) Enabled() bool { return true }
+func (f MLClientAdapter) Predict(ctx context.Context, text string) (MLResult, error) {
+    return f(ctx, text)
+}
+\end{verbatim}
+
+Adapter này cho phép test viết:
+
+\begin{verbatim}
+mockPredictor := engine.MLClientAdapter(func(_ context.Context, text string)
+                                         (engine.MLResult, error) {
+    if strings.Contains(text, "UNION SELECT") {
+        return engine.MLResult{Label: "sqli", Confidence: 0.99}, nil
+    }
+    return engine.MLResult{Label: "normal", Confidence: 0.99}, nil
+})
+\end{verbatim}
+
+không cần thiết lập HTTP server, không phụ thuộc ML service chạy thật.
+
+\textbf{Cấp 3 -- Implementation thực tế ở package \texttt{ml}}: Package
+\texttt{ml} chứa \texttt{Client} struct với HTTP transport, retry, timeout
+-- và \textit{tự nó} satisfy \texttt{engine.MLPredictor} một cách ngầm
+định (Go không yêu cầu \texttt{implements} keyword). Engine không biết và
+không cần biết \texttt{ml.Client} tồn tại; nó chỉ nhận một
+\texttt{MLPredictor} qua constructor:
+
+\begin{verbatim}
+func NewEngine(rules []Rule, predictor MLPredictor, ...) *Engine {
+    // engine không quan tâm predictor là gì - chỉ gọi Predict()
+}
+\end{verbatim}
+
+\subsection{Lợi ích}
+\label{subsection:5.4.3}
+
+Tách biệt qua interface mang lại bốn lợi ích đo lường được trong codebase.
+
+\textbf{Lợi ích 1 -- Test isolation tuyệt đối}: 100\% các unit test của
+engine chạy không cần ML service. Trên CI, các test engine chạy trong
+\texttt{go test ./internal/engine/...} không cần khởi động Docker hay
+external dependency, hoàn tất dưới 5 giây.
+
+\textbf{Lợi ích 2 -- Thay thế ML backend không sửa engine}: Nếu cần
+chuyển từ HTTP sang gRPC hoặc embedded model, chỉ cần viết một implementation
+mới của \texttt{MLPredictor} -- engine không phải sửa một dòng. Đề tài
+đã chứng minh điều này khi viết \texttt{StubPredictor} cho test (luôn trả
+về \texttt{normal}) và \texttt{ChaoticPredictor} cho stress test (random
+delay 0--2 giây) -- cả hai đều plug vào engine không sửa engine.
+
+\textbf{Lợi ích 3 -- Phương thức \texttt{Enabled()} giúp tắt mềm ML}: Khi
+operator muốn tạm dừng ML (ví dụ đang debug), chỉ cần \texttt{Enabled()}
+trả false -- engine bỏ qua mọi lời gọi ML mà không cần restart hay sửa
+config. Đây là một dạng feature flag tích hợp sẵn.
+
+\textbf{Lợi ích 4 -- Codebase rõ ràng hơn}: Sau khi tái cấu trúc, package
+\texttt{engine} không còn import \texttt{net/http}; nó hoàn toàn pure
+trong việc nhận một function và trả về quyết định. Tính chất pure này
+giúp \texttt{engine} có thể được tái sử dụng trong các bối cảnh khác (ví
+dụ chạy offline phân tích log batch) mà không kéo theo HTTP runtime.
+
+% ====================================================================
+\section{Củng cố lớp Auth: bịt lỗ leo thang đặc quyền và bảo vệ Invariant}
+\label{section:5.5}
+
+\subsection{Đặt vấn đề}
+\label{subsection:5.5.1}
+
+Lớp xác thực và phân quyền là \textit{phòng tuyến cuối cùng} bảo vệ các
+chức năng nhạy cảm của WAF. Một lỗ hổng ở đây có khả năng vô hiệu hóa
+toàn bộ hệ thống: nếu một người dùng có thể tự lên quyền admin, họ có thể
+tắt rule, thêm IP vào whitelist, hoặc thay đổi cấu hình theo ý muốn --
+khiến WAF không còn bảo vệ cho ứng dụng phía sau.
+
+Qua quá trình review code, đề tài đã phát hiện và xử lý bốn lớp vấn đề
+nghiêm trọng trong thiết kế auth ban đầu:
+
+\textbf{Vấn đề 1 -- Privilege escalation qua \texttt{/register}}: Endpoint
+đăng ký công khai ban đầu chấp nhận trường \texttt{role} từ client. Một
+request \texttt{POST /register} với body \texttt{\{"username":"x", "password":"y",
+"role":"admin"\}} tạo được tài khoản admin. Bất kỳ ai có thể truy cập trang
+register đều có thể tự lên quyền cao nhất.
+
+\textbf{Vấn đề 2 -- Không có cơ chế đổi mật khẩu}: Người dùng không thể tự
+đổi mật khẩu sau khi đăng nhập. Hậu quả: tài khoản admin mặc định
+(\texttt{admin/admin123}) bị giữ nguyên không thể đổi qua giao diện -- chỉ
+có thể đổi bằng cách truy cập trực tiếp database.
+
+\textbf{Vấn đề 3 -- Lockout vĩnh viễn}: Không có cơ chế ngăn chặn việc xóa
+hoặc demote admin cuối cùng. Một admin có thể vô tình (hoặc cố ý) xóa tài
+khoản admin còn lại duy nhất, khiến hệ thống không còn tài khoản admin
+nào -- chỉ có thể khôi phục bằng can thiệp trực tiếp ở DB.
+
+\textbf{Vấn đề 4 -- Không có trang quản trị tài khoản}: Việc thay đổi role,
+xóa tài khoản, reset password đều phải làm qua SQL trực tiếp. Đây là rào
+cản vận hành và bản thân quy trình này dễ tạo lỗi.
+
+\subsection{Giải pháp đề xuất}
+\label{subsection:5.5.2}
+
+Đề tài thiết kế lại lớp auth với năm thay đổi cụ thể, mỗi thay đổi giải
+quyết một trong các vấn đề trên (và một số bonus).
+
+\textbf{Thay đổi 1 -- Bịt lỗ leo thang đặc quyền}: Loại bỏ \textbf{hoàn
+toàn} trường \texttt{Role} khỏi struct \texttt{RegisterRequest} ở phía
+server. Ngay cả khi client gửi \texttt{role} trong body, decoder JSON sẽ
+bỏ qua field này do struct không định nghĩa. Trong handler, biến
+\texttt{const role = "viewer"} được hard-code:
+
+\begin{verbatim}
+// internal/api/auth_handlers.go
+type RegisterRequest struct {
+    Username string `json:"username"`
+    Email    string `json:"email"`
+    Password string `json:"password"`
+    // KHÔNG có field Role - public endpoint không được phép chọn role
+}
+
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+    // ...
+    const role = "viewer"  // hard-code, không phụ thuộc input
+    // ...
+}
+\end{verbatim}
+
+\textbf{Thay đổi 2 -- Endpoint đổi password tự phục vụ}: Thêm endpoint
+\texttt{PUT /waf-api/auth/me/password} cho phép người dùng đổi mật khẩu
+của \textit{chính mình}. Yêu cầu cứng: phải nhập đúng mật khẩu cũ trước
+khi cho đổi. Lý do của ràng buộc này là phòng thủ chiều sâu -- ngay cả khi
+attacker chiếm được JWT (ví dụ qua một máy trạm bị compromise hoặc XSS
+vô tình), họ không thể chiếm vĩnh viễn tài khoản nếu không biết mật khẩu
+cũ. Sau khi user đổi mật khẩu, JWT cũ vẫn còn hiệu lực nhưng họ có thời
+gian để revoke và đăng nhập lại với mật khẩu mới.
+
+\textbf{Thay đổi 3 -- Trang quản trị user dành cho admin}: Thêm trang
+\texttt{users.html} và các endpoint admin tương ứng (\texttt{/waf-api/auth/users/*})
+cho phép admin thực hiện đầy đủ CRUD trên tài khoản: tạo mới với role tùy
+chọn, sửa email/role, reset password (không cần old\_password do là admin
+action), và xóa.
+
+\textbf{Thay đổi 4 -- Last-admin protection}: Trước khi xóa hoặc demote
+admin, hệ thống truy vấn \texttt{SELECT COUNT(*) FROM users WHERE role =
+'admin'}. Nếu count = 1 và target là chính admin đó, thao tác bị từ chối
+với mã 400 và message rõ ràng (\texttt{"cannot delete the last admin"}).
+Bất biến này đảm bảo hệ thống luôn có ít nhất một admin -- một tính chất
+gọi là \textit{system invariant} trong CS lý thuyết.
+
+\textbf{Thay đổi 5 -- Self-action protection}: Admin không được xóa hoặc
+demote chính tài khoản đang đăng nhập. Kiểm tra này được thực hiện ở
+\textbf{cả hai tầng}: handler so sánh \texttt{actorID} (từ JWT) với
+\texttt{targetID} (trên path), và UI disable nút Delete cho hàng tương ứng
+với chính admin đang đăng nhập. Hai tầng phòng thủ thực hiện cùng kiểm
+tra -- nếu một tầng có lỗi, tầng còn lại vẫn bắt được, theo nguyên tắc
+defense-in-depth.
+
+\textbf{Bổ sung -- JWT trong HttpOnly cookie}: Chuyển từ lưu JWT trong
+\texttt{localStorage} (truy cập được từ JavaScript) sang HttpOnly cookie
+với \texttt{Secure} flag. JavaScript không đọc được cookie này, ngăn chặn
+trộm token qua XSS. Đồng thời vẫn hỗ trợ \texttt{Authorization: Bearer}
+header cho API client.
+
+\textbf{Bổ sung -- Audit logging mọi thao tác}: Toàn bộ thao tác auth
+(login thành công/thất bại, đổi password, tạo/sửa/xóa user) đều ghi vào
+\texttt{audit\_logs} với \texttt{event\_type = 'system'} và
+\texttt{actor\_id}. Điều này tạo dấu vết kiểm toán đầy đủ cho mọi can
+thiệp vào lớp người dùng.
+
+\subsection{Kết quả}
+\label{subsection:5.5.3}
+
+Toàn bộ các thay đổi được kiểm chứng bằng 10 test case auth (bảng
+\ref{table:auth-tests}, mục \ref{subsection:4.6.5}) và \textbf{tất cả đều
+pass}. Đặc biệt quan trọng:
+
+\begin{itemize}[leftmargin=*]
+    \item Test regression \textbf{privilege escalation}: \texttt{POST /register
+    \{"role":"admin"\}} trả về user mới có \texttt{role = "viewer"}. Lỗ
+    hổng nghiêm trọng nhất đã được đóng vĩnh viễn ở tầng struct.
+
+    \item Bốn test \textbf{invariant lockout}: Xóa/demote admin cuối cùng,
+    và tự xóa/demote chính mình -- cả bốn trả về 400 với thông điệp rõ
+    ràng. Hệ thống không thể bị đẩy vào trạng thái không có admin.
+
+    \item Test \textbf{change password}: Sai old\_password \(\to\) 401;
+    đúng old\_password \(\to\) 200 + audit log entry. Cơ chế chống takeover
+    khi JWT bị lộ hoạt động đúng.
+
+    \item Endpoint matrix kiểm tra trên 100\% các endpoint admin: không
+    có token \(\to\) 401, viewer/editor token \(\to\) 403, admin token
+    \(\to\) 200. Không có endpoint admin nào bỏ sót gate \texttt{requireAdmin}.
+\end{itemize}
+
+Ý nghĩa rộng hơn: hệ thống đã chuyển từ trạng thái \textit{có lỗ hổng
+critical đã biết} sang trạng thái \textit{tất cả các vector tấn công đã
+biết đều được vá và có test regression bảo vệ}. Đây là sự khác biệt giữa
+một codebase ``demo'' và một codebase đã sẵn sàng cho môi trường production
+sơ cấp.
+
+\bigskip
+\noindent\textbf{Kết chương.}
+Chương này đã trình bày năm đóng góp độc lập của đề tài: cơ chế anomaly
+scoring hai lớp với ML gray-zone activation tận dụng được điểm mạnh của
+cả rule lẫn ML mà không phải chịu chi phí latency của ML trên toàn bộ
+traffic; bộ luật 78 rule với transform chain JSON-declarative và TOKEN
+proximity match chống evasion một cách hệ thống; pipeline huấn luyện với
+hard gate đã thực sự ngăn được một regression (v6) khỏi vào production;
+thiết kế interface tách biệt engine và ML client mở đường cho test isolation
+và khả năng thay thế backend; và đợt củng cố lớp auth đã đóng lỗ leo thang
+đặc quyền nghiêm trọng cùng các bất biến bảo vệ chống lockout. Mỗi đóng
+góp đều có giá trị độc lập có thể tham khảo trong các dự án WAF mã nguồn
+mở khác hoặc các hệ thống bảo mật ứng dụng web tương tự. Chương cuối
+(\ref{section:6.1}) sẽ tổng kết mức độ hoàn thành mục tiêu, nhìn nhận các
+hạn chế còn tồn tại, và đề xuất hướng phát triển tiếp theo cho hệ thống.
+
+\end{document}

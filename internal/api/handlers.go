@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -99,11 +101,19 @@ func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/waf-api/auth/login", s.handleLogin)
 	mux.HandleFunc("/waf-api/auth/logout", s.handleLogout)
 
-	// Authenticated user info (any logged-in user)
-	mux.HandleFunc("/waf-api/auth/me", s.requireAuthN(s.handleGetCurrentUser))
+	// Authenticated user info + self-service settings (any logged-in user)
+	mux.HandleFunc("/waf-api/auth/me", s.requireAuthN(s.handleMe))
+	mux.HandleFunc("/waf-api/auth/me/password", s.requireAuthN(s.handleChangeOwnPassword))
 
 	// Admin-only user management
-	mux.HandleFunc("/waf-api/auth/users", s.requireAdmin(s.handleListUsers))
+	// GET   /waf-api/auth/users         → list users
+	// POST  /waf-api/auth/users         → create user (with chosen role)
+	// GET   /waf-api/auth/users/{id}    → fetch one user (for edit-form prefill)
+	// PUT   /waf-api/auth/users/{id}    → update role/email
+	// DELETE /waf-api/auth/users/{id}   → delete (last-admin / self-delete guarded)
+	// POST  /waf-api/auth/users/{id}/password → admin reset password
+	mux.HandleFunc("/waf-api/auth/users", s.requireAdmin(s.handleUsers))
+	mux.HandleFunc("/waf-api/auth/users/", s.requireAdmin(s.handleUserByID))
 
 	// Stats endpoints (read-only — keep public for dashboard)
 	mux.HandleFunc("/waf-api/stats", s.handleStats)
@@ -144,6 +154,7 @@ func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/waf-api/alerts/config", s.requireAdminForWrite(s.handleAlertsConfig))
 	mux.HandleFunc("/waf-api/alerts/stats", s.handleAlertsStats)
 	mux.HandleFunc("/waf-api/alerts/test", s.requireAdmin(s.handleAlertsTest))
+	mux.HandleFunc("/waf-api/alerts/test-broadcast", s.requireAdmin(s.handleAlertsTestBroadcast))
 }
 
 // authContext holds the authenticated user identity extracted from a JWT.
@@ -179,6 +190,26 @@ func (s *APIServer) authenticate(r *http.Request) (*authContext, error) {
 		Username: claims.Username,
 		Role:     claims.Role,
 	}, nil
+}
+
+// requestIsHTTPS reports whether the original client request reached us
+// over TLS. r.TLS alone is wrong when the WAF sits behind a TLS-
+// terminating reverse proxy (CDN, load balancer) — then r.TLS is nil
+// even though the user-facing leg was HTTPS. Honour X-Forwarded-Proto
+// so cookies still get the Secure flag in that topology.
+//
+// Treats X-Forwarded-Proto as trustworthy: this WAF is itself the edge
+// in most deployments, but if another proxy sits in front the operator
+// is expected to scrub spoofed forwarded headers before they reach us
+// (standard reverse-proxy hygiene).
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		return true
+	}
+	return false
 }
 
 // extractToken pulls a JWT from `Authorization: Bearer <tok>` or the
@@ -269,7 +300,7 @@ func (s *APIServer) PageGuard(next http.Handler) http.Handler {
 			http.SetCookie(w, &http.Cookie{
 				Name: "waf_token", Value: "", Path: "/", MaxAge: -1,
 				HttpOnly: true, SameSite: http.SameSiteLaxMode,
-				Secure: r.TLS != nil,
+				Secure: requestIsHTTPS(r),
 			})
 			redirectToLogin(w, r, "session expired")
 			return
@@ -278,11 +309,43 @@ func (s *APIServer) PageGuard(next http.Handler) http.Handler {
 	})
 }
 
+// isSafeNextPath reports whether `p` is a same-origin relative URI safe
+// to put in `?next=`. The JS-side check on login.html applies the same
+// rule, but a defence-in-depth check here means an XSS / disabled-JS
+// path can't turn the login page into an open-redirect bounce.
+//
+// Rules:
+//   - must start with exactly one '/'
+//   - must NOT start with "//" (protocol-relative URLs go cross-origin)
+//   - must NOT start with "/\" (Chrome/Safari rewrite to scheme-relative)
+//   - must NOT contain a control char or NUL (request smuggling / log
+//     injection prevention)
+func isSafeNextPath(p string) bool {
+	if p == "" || p[0] != '/' {
+		return false
+	}
+	if strings.HasPrefix(p, "//") || strings.HasPrefix(p, "/\\") {
+		return false
+	}
+	for _, c := range p {
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func redirectToLogin(w http.ResponseWriter, r *http.Request, reason string) {
 	target := "/login.html"
 	q := url.Values{}
+	// Only propagate `next` when the original URI is genuinely same-origin
+	// relative. RequestURI() includes path + query; if either is hostile
+	// (cross-origin, protocol-relative, control chars) we drop it on the
+	// floor and the user lands at the bare /login.html.
 	if r.URL.Path != "" && r.URL.Path != "/login.html" {
-		q.Set("next", r.URL.RequestURI())
+		if candidate := r.URL.RequestURI(); isSafeNextPath(candidate) {
+			q.Set("next", candidate)
+		}
 	}
 	if reason != "" {
 		q.Set("reason", reason)
@@ -434,6 +497,18 @@ type LogEntry struct {
 	// Headers captured from the request — Cookie / Authorization values
 	// are already redacted by the WAF middleware before they land here.
 	Headers map[string][]string `json:"headers,omitempty"`
+
+	// BlockReason carries the human-readable trigger that produced the
+	// decision (rule name, rate-limit message, system event message,
+	// etc.). The dashboard surfaces it on click and uses it as the row
+	// text for SYSTEM entries that have no path/method.
+	BlockReason string `json:"block_reason,omitempty"`
+
+	// Metadata is the raw bag from the audit entry — primarily so SYSTEM
+	// rows can show `event_type` + `message` without a server-side
+	// transformation. For request rows this is also where ML verdict,
+	// whitelist hits, and other side-channel info live.
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // MLVerdictAPI mirrors the ml_* metadata stamped onto the audit entry by
@@ -625,6 +700,8 @@ func (s *APIServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 			Source:         computeSource(len(ruleMatches), mlVerdict, isWhitelistedEntry(entry.Metadata)),
 			ML:             mlVerdict,
 			Headers:        entry.Headers,
+			BlockReason:    entry.BlockReason,
+			Metadata:       entry.Metadata,
 		})
 	}
 
@@ -733,6 +810,8 @@ func (s *APIServer) handleRecentLogs(w http.ResponseWriter, r *http.Request) {
 			Source:         computeSource(len(ruleMatches), mlVerdict, isWhitelistedEntry(entry.Metadata)),
 			ML:             mlVerdict,
 			Headers:        entry.Headers,
+			BlockReason:    entry.BlockReason,
+			Metadata:       entry.Metadata,
 		})
 	}
 
@@ -1110,18 +1189,37 @@ func (s *APIServer) handleRuleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Check file extension
-	if len(header.Filename) < 5 || header.Filename[len(header.Filename)-5:] != ".json" {
+	// Extension check — filepath.Ext handles trailing dots, multiple
+	// extensions ("rules.json.html" → ".html"), and Windows-style paths.
+	// We also check the Content-Type the browser advertised; a strict
+	// allow-list keeps an attacker from sending an arbitrary blob with a
+	// renamed extension.
+	if !strings.EqualFold(filepath.Ext(header.Filename), ".json") {
 		writeJSON(w, UploadResponse{
 			Success: false,
-			Message: "File must be a JSON file",
+			Message: "File must have a .json extension",
+		})
+		return
+	}
+	if ct := header.Header.Get("Content-Type"); ct != "" &&
+		!strings.HasPrefix(ct, "application/json") &&
+		!strings.HasPrefix(ct, "text/json") &&
+		ct != "application/octet-stream" {
+		writeJSON(w, UploadResponse{
+			Success: false,
+			Message: "Unexpected Content-Type for a rules file",
+			Errors:  []string{"got " + ct + ", expected application/json"},
 		})
 		return
 	}
 
-	// Read file content
-	fileData := make([]byte, header.Size)
-	_, err = file.Read(fileData)
+	// Read file content. io.ReadAll bounded by ParseMultipartForm's 10MB
+	// limit above — the body has already been buffered by the multipart
+	// parser, so this won't blow memory. The previous `file.Read(make(...,
+	// header.Size))` was racy: Read may return fewer bytes than asked for
+	// without erroring, leaving a tail of zero bytes in the buffer that
+	// would then fail JSON parsing with a confusing message.
+	fileData, err := io.ReadAll(file)
 	if err != nil {
 		writeJSON(w, UploadResponse{
 			Success: false,

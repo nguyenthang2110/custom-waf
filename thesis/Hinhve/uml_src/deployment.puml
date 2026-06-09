@@ -1,0 +1,80 @@
+@startuml deployment
+' Biểu đồ triển khai (deployment diagram)
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName "Times"
+skinparam defaultFontSize 14
+skinparam linetype ortho
+skinparam ArrowColor #333333
+skinparam ArrowThickness 1.2
+skinparam node {
+  BackgroundColor #F4F4FF
+  BorderColor #555555
+  FontSize 13
+}
+skinparam database {
+  BackgroundColor #FFE9A8
+  BorderColor #AA8833
+  FontSize 13
+}
+skinparam artifact {
+  BackgroundColor #E8F0FF
+  BorderColor #4477AA
+  FontSize 13
+}
+skinparam cloud {
+  BackgroundColor #FFFFFF
+  BorderColor #888888
+  FontSize 13
+}
+skinparam note {
+  BackgroundColor #FFFBE0
+  BorderColor #888888
+  FontSize 12
+}
+
+cloud "Internet" as net
+
+node "Edge / Reverse Proxy Host" as edge {
+  artifact "WAF binary\n(Go, single binary,\nweb assets embed)" as waf
+  artifact "Config\nconfigs/config.yaml\nconfigs/rules/*.json" as cfg
+  artifact "Certs\nconfigs/certs/*.pem" as cert
+}
+
+node "ML Host" as mlhost {
+  artifact "FastAPI service\n(ml-service/app.py)" as fapi
+  artifact "DistilBERT model\nMODEL_DIR/final_model_v3" as model
+}
+
+node "Data Host" as dh {
+  database "PostgreSQL\nport 5432" as pg
+  artifact "Audit Log files\n(fallback)\nlogs/audit-*.log" as flog
+  artifact "Training JSONL\ntrain_export/*.jsonl" as train
+}
+
+node "Upstream App Host" as uph {
+  artifact "Origin application\n(HTTP, plaintext\ntrong mạng nội bộ)" as origin
+}
+
+net --> waf : HTTPS (443) /\nHTTP (80)
+waf --> origin : reverse proxy
+waf --> fapi : HTTP POST /predict\n(loopback / VLAN)
+fapi --> model : load model
+waf --> pg : SQL (TLS / loopback)
+waf --> flog : write
+waf --> train : write
+
+note right of waf
+  Listen ports:
+  • 80, 443 — traffic
+  • 8080 — dashboard\n  (chặn bằng admin\n  allowed_cidrs)
+end note
+
+note right of fapi
+  Endpoint:
+  • GET /health
+  • POST /predict
+  • POST /predict_batch
+end note
+
+@enduml

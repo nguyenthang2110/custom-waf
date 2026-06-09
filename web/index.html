@@ -779,9 +779,30 @@
             }
 
             _logRowHtml(log, markFlash = false) {
-                const lat = log.latency_ms.toFixed(1) + ' ms';
-                const latColor = log.latency_ms > 50 ? 'color: var(--pill-chal-fg);' : 'color: var(--fg-2);';
-                const path = (log.path || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                const lat = (log.latency_ms || 0).toFixed(1) + ' ms';
+                const latColor = (log.latency_ms || 0) > 50 ? 'color: var(--pill-chal-fg);' : 'color: var(--fg-2);';
+                const isSystem = log.decision === 'SYSTEM';
+                const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                // System events have no IP / method / path — collapse those
+                // columns into one cell that surfaces what actually changed
+                // (event_type + free-text message). Without this the row
+                // looks empty and operators ignore it.
+                if (isSystem) {
+                    const md = log.metadata || {};
+                    const evt = esc(md.event_type || '—');
+                    const msg = esc(md.message || log.block_reason || '');
+                    return `
+                        <tr ${markFlash ? 'data-flash' : ''} onclick="dashboard.showLogDetails('${log.request_id}')">
+                            <td class="text-xs whitespace-nowrap" style="color: var(--fg-2);">${this.formatTime(log.timestamp)}</td>
+                            <td><span class="chip">system</span></td>
+                            <td><span class="pill pill-method">—</span></td>
+                            <td class="font-mono text-xs max-w-xs truncate" title="${evt}: ${msg}"><span style="color: var(--pill-log-fg);">${evt}</span>${msg ? `<span class="text-faint"> · ${msg}</span>` : ''}</td>
+                            <td>${this.renderDecisionBadge(log.decision)}</td>
+                            <td><span class="chip">—</span></td>
+                            <td class="text-right text-xs whitespace-nowrap"><span style="${latColor}">—</span></td>
+                        </tr>`;
+                }
+                const path = esc(log.path);
                 return `
                     <tr ${markFlash ? 'data-flash' : ''} onclick="dashboard.showLogDetails('${log.request_id}')">
                         <td class="text-xs whitespace-nowrap" style="color: var(--fg-2);">${this.formatTime(log.timestamp)}</td>
@@ -795,7 +816,15 @@
             }
 
             renderHeader() {
-                const user = JSON.parse(localStorage.getItem('waf_user') || '{"username":"User"}').username;
+                const userObj = JSON.parse(localStorage.getItem('waf_user') || '{"username":"User"}');
+                const user = userObj.username || 'User';
+                const role = (userObj.role || '').toLowerCase();
+                const adminLink = role === 'admin'
+                    ? `<a href="/dashboard/users.html" class="btn btn-ghost" title="User management (admin only)">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+                            Users
+                       </a>`
+                    : '';
                 return `
                     <header class="sticky top-0 z-30 backdrop-blur-xl" style="background: color-mix(in srgb, var(--bg-0) 70%, transparent); border-bottom: 1px solid var(--line);">
                         <div class="max-w-7xl mx-auto px-6 py-4">
@@ -820,6 +849,11 @@
                                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
                                         Refresh
                                     </button>
+                                    ${adminLink}
+                                    <a href="/dashboard/settings.html" class="btn btn-ghost" title="Account settings">
+                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                                        Settings
+                                    </a>
                                     <div class="flex items-center gap-2 px-3 py-2 rounded-lg" style="background: var(--pill-allow-bg); border: 1px solid var(--pill-allow-bd);">
                                         <div class="w-1.5 h-1.5 rounded-full status-dot" style="background: var(--pill-allow-fg);"></div>
                                         <span class="text-xs font-medium" style="color: var(--pill-allow-fg);">Online</span>
@@ -921,6 +955,7 @@
                                     <option value="ALLOW"     ${this.logsFilters.decision === 'ALLOW'     ? 'selected' : ''}>Allow</option>
                                     <option value="BLOCK"     ${this.logsFilters.decision === 'BLOCK'     ? 'selected' : ''}>Block</option>
                                     <option value="CHALLENGE" ${this.logsFilters.decision === 'CHALLENGE' ? 'selected' : ''}>Challenge</option>
+                                    <option value="SYSTEM"    ${this.logsFilters.decision === 'SYSTEM'    ? 'selected' : ''}>System</option>
                                 </select>
                                 <select onchange="dashboard.logsFilters.method = this.value" class="pill-input md:col-span-2">
                                     <option value="">All methods</option>
@@ -1931,6 +1966,11 @@
             }
 
             _renderAlertsGeneral(c, stats) {
+                // Default request-event toggle on so existing setups keep
+                // getting block alerts; system-event toggle off so admin
+                // dashboard clicks don't page anyone unless opted in.
+                const sendReq = (c.send_request_events !== false);
+                const sendSys = (c.send_system_events === true);
                 return `
                     <div class="glass p-5 space-y-5">
                         <div class="flex items-center justify-between gap-4 flex-wrap">
@@ -1967,16 +2007,77 @@
                         </div>
 
                         <div class="rounded-lg p-4" style="background:var(--surface); border:1px solid var(--line)">
+                            <div class="text-sm font-semibold mb-2" style="color:var(--fg-0)">Loại event muốn nhận</div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <label class="flex items-start gap-2.5 rounded-lg p-3 cursor-pointer" style="background:var(--bg-1); border:1px solid var(--line)">
+                                    <input type="checkbox" class="mt-1" ${sendReq ? 'checked' : ''} onchange="dashboard.alertsConfig.send_request_events=this.checked">
+                                    <div>
+                                        <div class="text-sm font-medium" style="color:var(--fg-0)">Blocked / challenged requests</div>
+                                        <div class="text-xs text-faint">Request bị <b>BLOCK</b> hoặc <b>CHALLENGE</b> bởi rule engine, ML, hoặc rate-limit. Severity lấy từ rule khớp cao nhất.</div>
+                                    </div>
+                                </label>
+                                <label class="flex items-start gap-2.5 rounded-lg p-3 cursor-pointer" style="background:var(--bg-1); border:1px solid var(--line)">
+                                    <input type="checkbox" class="mt-1" ${sendSys ? 'checked' : ''} onchange="dashboard.alertsConfig.send_system_events=this.checked">
+                                    <div>
+                                        <div class="text-sm font-medium" style="color:var(--fg-0)">System events</div>
+                                        <div class="text-xs text-faint">Admin actions ảnh hưởng WAF: <code>CONFIG_CHANGE</code>, <code>LOGS_CLEARED</code>, <code>USER_DELETED</code>, <code>USER_ROLE_CHANGED</code>, <code>USER_PASSWORD_RESET_BY_ADMIN</code> → <b>HIGH</b>. Tạo user / đổi email / đổi password → MEDIUM. Login / register / profile edit → INFO. <code>*_ERROR</code> luôn HIGH.</div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="rounded-lg p-4" style="background:var(--surface); border:1px solid var(--line)">
+                            <div class="flex items-center justify-between gap-3 flex-wrap mb-2">
+                                <div>
+                                    <div class="text-sm font-semibold" style="color:var(--fg-0)">Test broadcast (pipeline thật)</div>
+                                    <div class="text-xs text-faint">Bắn 1 event synthetic qua <b>đúng pipeline</b> (kind → severity → throttle → fanout tới mọi destination enabled). Bypass throttle bằng RuleID động, severity HIGH để qua mọi mức min_severity.</div>
+                                </div>
+                                <div class="flex gap-2 flex-wrap">
+                                    <button onclick="dashboard.alertsTestBroadcast('request')" class="btn btn-primary btn-sm" title="Bắn 1 BLOCK request giả qua kênh request">Test REQUEST</button>
+                                    <button onclick="dashboard.alertsTestBroadcast('system')" class="btn btn-primary btn-sm" title="Bắn 1 system event giả qua kênh system">Test SYSTEM</button>
+                                </div>
+                            </div>
+                            <div class="text-xs text-faint">Khác nút Test trong từng destination: nút này đi qua filter (severity/kind/throttle); nút trong destination bypass filter để debug riêng kết nối SMTP/HTTP.</div>
+                        </div>
+
+                        <div class="rounded-lg p-4" style="background:var(--surface); border:1px solid var(--line)">
                             <div class="text-sm font-semibold mb-1" style="color:var(--fg-0)">Cách nó hoạt động</div>
                             <ul class="text-xs" style="color:var(--fg-2); line-height:1.7; padding-left:18px; list-style:disc">
-                                <li>Mỗi request bị <b>BLOCK</b> hoặc <b>CHALLENGE</b> sẽ tạo 1 event.</li>
-                                <li>Event được lọc theo <code>min_severity</code> rồi dedup trong cửa sổ <code>throttle_seconds</code>.</li>
-                                <li>Event sống sót gửi <b>song song</b> tới mọi destination đang <b>enabled</b> trên tất cả 3 channel.</li>
+                                <li>Event phải qua: master <code>enabled</code> → đúng loại đã chọn ở trên → đạt <code>min_severity</code> → không trong cửa sổ dedup <code>throttle_seconds</code>.</li>
+                                <li>Event sống sót gửi <b>song song</b> tới mọi destination đang <b>enabled</b> trên cả 3 channel.</li>
                                 <li>Send là <b>async</b> — không block hot path WAF. Timeout mỗi destination 5s.</li>
                             </ul>
                         </div>
                     </div>
                 `;
+            }
+
+            // Fires POST /waf-api/alerts/test-broadcast which synthesises an
+            // event and shoves it through notifier.Send() — same gates as a
+            // real block/config-change. Returns either {sent:true} or a
+            // reason explaining which filter swallowed it so the operator
+            // doesn't have to reverse-engineer their config.
+            async alertsTestBroadcast(kind) {
+                try {
+                    const r = await authFetch(`${API_BASE}/alerts/test-broadcast`, {
+                        method: 'POST',
+                        headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify({kind})
+                    });
+                    const j = await r.json();
+                    if (j.sent) {
+                        const dests = j.enabled_dests || 0;
+                        showToast(`Broadcast ${kind.toUpperCase()} fanned out to ${dests} destination${dests===1?'':'s'} (severity HIGH ≥ ${j.min_severity}).`, 'success');
+                    } else {
+                        showToast(`Broadcast ${kind.toUpperCase()} dropped — ${j.reason || 'unknown reason'}.`, 'error');
+                    }
+                    // Refresh stats so the General "Last sent" timestamp moves.
+                    const sR = await authFetch(`${API_BASE}/alerts/stats`);
+                    if (sR.ok) this.alertsStats = await sR.json();
+                    this.render();
+                } catch (e) {
+                    showToast(`Broadcast ${kind.toUpperCase()} failed: ${e.message}`, 'error');
+                }
             }
 
             // ------------------- LIST VIEW (destinations table) -------------------
@@ -2445,15 +2546,13 @@
                 const burst    = cfg ? cfg.rate_limit.burst_size         : 20;
                 const epLimits = (cfg && cfg.rate_limit.endpoint_limits) ? cfg.rate_limit.endpoint_limits : {};
                 const epCount  = Object.keys(epLimits).length;
-                const bypassCount = (this.bypassPaths || []).length;
 
                 const sub = this.configSubTab || 'backend';
 
                 const tabs = [
                     { id: 'backend',    label: 'Backend Server',  icon: 'M5 12h14M12 5l7 7-7 7',                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          meta: '' },
                     { id: 'detection',  label: 'Detection',       icon: 'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z',                                                                                                                                                                                                  meta: `${block_t.toFixed(1)} / ${chal_t.toFixed(1)}` },
-                    { id: 'ratelimit',  label: 'Rate Limiting',   icon: 'M13 10V3L4 14h7v7l9-11h-7z',                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       meta: `${rpm} rpm` },
-                    { id: 'bypass',     label: 'Bypass Paths',    icon: 'M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9',                                                                                                                                                                                                                                                                                                                                meta: `${bypassCount}` }
+                    { id: 'ratelimit',  label: 'Rate Limiting',   icon: 'M13 10V3L4 14h7v7l9-11h-7z',                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       meta: `${rpm} rpm` }
                 ];
 
                 const sidebar = `
@@ -2474,7 +2573,6 @@
                 switch (sub) {
                     case 'detection': body = this._renderConfigDetection(block_t, chal_t); break;
                     case 'ratelimit': body = this._renderConfigRateLimit(rpm, burst, epLimits, epCount); break;
-                    case 'bypass':    body = this._renderConfigBypass(); break;
                     case 'backend':
                     default:          body = this._renderConfigBackend(); break;
                 }
@@ -2574,39 +2672,39 @@
             _renderConfigRateLimit(rpm, burst, epLimits, epCount) {
                 return `
                     <div class="space-y-5">
-                        <!-- Global -->
+                        <!-- Default fallback values -->
                         <div class="glass p-6">
                             <div class="section-head">
                                 <div class="section-icon" style="color: var(--accent);"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg></div>
                                 <div>
-                                    <h3 class="text-base font-bold">Global Rate Limiting</h3>
-                                    <p class="text-xs text-faint">Token bucket per client IP — applies when no endpoint override matches</p>
+                                    <h3 class="text-base font-bold">Default Limits</h3>
+                                    <p class="text-xs text-faint">Fallback values used by endpoint entries that leave RPM or Burst blank — not a global cap</p>
                                 </div>
                             </div>
 
                             <div class="grid grid-cols-2 gap-3 mb-5">
-                                ${this.renderStatCard('Per-min',  rpm.toLocaleString(),   'cyan')}
-                                ${this.renderStatCard('Burst',    burst.toLocaleString(), 'green')}
+                                ${this.renderStatCard('Default RPM',   rpm.toLocaleString(),   'cyan')}
+                                ${this.renderStatCard('Default Burst', burst.toLocaleString(), 'green')}
                             </div>
 
                             <form onsubmit="dashboard.updateWAFConfig(event)" class="space-y-4">
                                 <div class="grid md:grid-cols-2 gap-3">
                                     <div>
-                                        <label class="block text-xs text-muted mb-1.5">Requests per minute <span class="text-faint">(per IP)</span></label>
+                                        <label class="block text-xs text-muted mb-1.5">Default requests per minute <span class="text-faint">(per IP)</span></label>
                                         <input type="number" min="60" max="10000" name="requests_per_min" value="${rpm}" required class="pill-input w-full">
-                                        <p class="text-[11px] text-faint mt-1">Range 60 – 10,000 (must be ≥ 60 for refill to fire)</p>
+                                        <p class="text-[11px] text-faint mt-1">Range 60 – 10,000. Used only by endpoint entries with RPM=0.</p>
                                     </div>
                                     <div>
-                                        <label class="block text-xs text-muted mb-1.5">Burst size <span class="text-faint">(short-term allowance)</span></label>
+                                        <label class="block text-xs text-muted mb-1.5">Default burst size <span class="text-faint">(short-term allowance)</span></label>
                                         <input type="number" min="1" max="1000" name="burst_size" value="${burst}" required class="pill-input w-full">
-                                        <p class="text-[11px] text-faint mt-1">Range 1 – 1,000</p>
+                                        <p class="text-[11px] text-faint mt-1">Range 1 – 1,000. Used only by endpoint entries with Burst=0.</p>
                                     </div>
                                 </div>
                                 <input type="hidden" name="block_threshold" value="${this.wafConfig ? this.wafConfig.decision.block_threshold : 5.0}">
                                 <input type="hidden" name="challenge_threshold" value="${this.wafConfig ? this.wafConfig.decision.challenge_threshold : 4.0}">
                                 <button type="submit" class="btn btn-primary">
                                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
-                                    Save global limits
+                                    Save defaults
                                 </button>
                             </form>
                         </div>
@@ -2616,16 +2714,16 @@
                             <div class="section-head">
                                 <div class="section-icon" style="color: var(--accent-2);"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 10h16M4 14h10M4 18h6"/></svg></div>
                                 <div>
-                                    <h3 class="text-base font-bold">Endpoint-Specific Limits</h3>
-                                    <p class="text-xs text-faint">Override the global bucket for specific paths (exact match) — useful for /login brute-force protection</p>
+                                    <h3 class="text-base font-bold">Rate-Limited Endpoints</h3>
+                                    <p class="text-xs text-faint">Rate limiting is opt-in: only the paths below get throttled. Empty list = no rate limiting anywhere.</p>
                                 </div>
                                 <span class="chip ml-auto">${epCount}</span>
                             </div>
 
                             <form onsubmit="dashboard.addEndpointLimit(event)" class="grid grid-cols-1 md:grid-cols-12 gap-2 mb-4">
-                                <input name="path"  type="text"   placeholder="/api/login" required class="pill-input md:col-span-6 font-mono">
-                                <input name="rpm"   type="number" min="1" placeholder="RPM"   required class="pill-input md:col-span-2">
-                                <input name="burst" type="number" min="1" placeholder="Burst" required class="pill-input md:col-span-2">
+                                <input name="path"  type="text"   placeholder="/api/login or /api/auth/" required class="pill-input md:col-span-6 font-mono">
+                                <input name="rpm"   type="number" min="0" placeholder="RPM"   required class="pill-input md:col-span-2">
+                                <input name="burst" type="number" min="0" placeholder="Burst" required class="pill-input md:col-span-2">
                                 <button type="submit" class="btn btn-primary md:col-span-2 justify-center">Add</button>
                             </form>
 
@@ -2634,12 +2732,12 @@
                                     <thead><tr><th>Path</th><th class="text-right">RPM</th><th class="text-right">Burst</th><th class="text-right">Action</th></tr></thead>
                                     <tbody>
                                         ${epCount === 0 ? `
-                                            <tr><td colspan="4" class="px-4 py-8 text-center text-faint">No endpoint-specific limits configured.</td></tr>
+                                            <tr><td colspan="4" class="px-4 py-8 text-center text-faint">No rate-limited endpoints. Add a path above to start throttling.</td></tr>
                                         ` : Object.entries(epLimits).map(([path, limit]) => `
                                             <tr style="cursor: default;">
                                                 <td><span class="chip">${path}</span></td>
-                                                <td class="text-right font-mono">${limit.requests_per_min}</td>
-                                                <td class="text-right font-mono">${limit.burst_size}</td>
+                                                <td class="text-right font-mono">${limit.requests_per_min || `<span class="text-faint" title="Falls back to default RPM">${rpm}*</span>`}</td>
+                                                <td class="text-right font-mono">${limit.burst_size || `<span class="text-faint" title="Falls back to default burst">${burst}*</span>`}</td>
                                                 <td class="text-right">
                                                     <button onclick="dashboard.removeEndpointLimit('${path}')" class="btn btn-ghost py-1 px-2 text-xs" style="color: var(--pill-block-fg);">Remove</button>
                                                 </td>
@@ -2651,57 +2749,8 @@
 
                             <div class="mt-4 rounded-lg p-3 flex items-start gap-2.5" style="background: var(--pill-chal-bg); border: 1px solid var(--pill-chal-bd);">
                                 <svg class="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="color: var(--pill-chal-fg);"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
-                                <p class="text-xs" style="color: var(--fg-1);">Endpoint match is <span class="font-mono" style="color: var(--pill-chal-fg);">exact</span> (not prefix). Each override creates a separate per-IP bucket — global bucket is unaffected.</p>
+                                <p class="text-xs" style="color: var(--fg-1);">Path ending in <span class="font-mono" style="color: var(--pill-chal-fg);">/</span> matches the whole subtree (longest pattern wins); otherwise the match is exact. Leave RPM or Burst at 0 to inherit the default. <span class="text-faint">*</span> in the table marks an inherited default.</p>
                             </div>
-                        </div>
-                    </div>
-                `;
-            }
-
-            _renderConfigBypass() {
-                const builtIn = ['/socket.io/', '/sockjs-node/', '/ws/', '/_ws/', '/health', '/healthz', '/metrics', '/dashboard', '/waf-api/'];
-                const list = this.bypassPaths || [];
-                return `
-                    <div class="glass p-6">
-                        <div class="section-head">
-                            <div class="section-icon" style="color: var(--pill-model-fg);"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg></div>
-                            <div>
-                                <h3 class="text-base font-bold">Bypass Paths</h3>
-                                <p class="text-xs text-faint">Skip WAF inspection AND audit log for these path prefixes</p>
-                            </div>
-                            <span class="chip ml-auto">${list.length}</span>
-                        </div>
-
-                        <div class="rounded-lg p-4 mb-4" style="background: var(--surface); border: 1px solid var(--line);">
-                            <div class="text-[10px] uppercase tracking-wider text-faint mb-2">Built-in (always bypassed)</div>
-                            <div class="flex flex-wrap gap-1.5">
-                                ${builtIn.map(p => `<span class="chip">${p}</span>`).join('')}
-                            </div>
-                        </div>
-
-                        <form onsubmit="dashboard.addBypassPath(event)" class="flex gap-2 mb-3">
-                            <input name="path" type="text" placeholder="/api/heartbeat or /poll" required class="pill-input flex-1 font-mono">
-                            <button type="submit" class="btn btn-primary">Add</button>
-                        </form>
-
-                        <div class="space-y-2 max-h-96 overflow-y-auto">
-                            ${list.length > 0 ? list.map(p => `
-                                <div class="flex items-center justify-between rounded-lg px-3 py-2" style="background: var(--surface); border: 1px solid var(--line);">
-                                    <span class="chip">${p.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>
-                                    <button class="btn btn-ghost py-1 px-2 text-xs" style="color: var(--pill-block-fg);" onclick="dashboard.removeBypassPath('${p.replace(/'/g, '&#39;')}')" title="Remove">
-                                        <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-                                    </button>
-                                </div>
-                            `).join('') : `
-                                <div class="rounded-lg p-4 text-center text-sm text-faint" style="background: var(--surface); border: 1px dashed var(--line);">
-                                    No custom bypass paths configured.
-                                </div>
-                            `}
-                        </div>
-
-                        <div class="mt-4 rounded-lg p-3 flex items-start gap-2.5" style="background: var(--pill-log-bg); border: 1px solid var(--pill-log-bd);">
-                            <svg class="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="color: var(--pill-log-fg);"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                            <p class="text-xs" style="color: var(--fg-1);">Match is <span class="font-mono" style="color: var(--pill-log-fg);">prefix</span>. Bypassed requests skip rule evaluation, ML inference, rate limit, AND audit log entirely.</p>
                         </div>
                     </div>
                 `;
@@ -2731,7 +2780,8 @@
                     BLOCK:     { cls: 'pill-block', label: 'Block' },
                     ALLOW:     { cls: 'pill-allow', label: 'Allow' },
                     CHALLENGE: { cls: 'pill-chal',  label: 'Challenge' },
-                    LOG:       { cls: 'pill-log',   label: 'Log' }
+                    LOG:       { cls: 'pill-log',   label: 'Log' },
+                    SYSTEM:    { cls: 'pill-method', label: 'System' }
                 };
                 const m = map[decision];
                 if (!m) return `<span class="pill pill-method">${decision}</span>`;
@@ -3248,71 +3298,9 @@
                     const response = await authFetch(`${API_BASE}/config`);
                     const data = await response.json();
                     this.wafConfig = data;
-                    // Surface bypass paths as a top-level field so renderConfiguration
-                    // can read it without diving into wafConfig.decision every time.
-                    this.bypassPaths = (data && data.decision && Array.isArray(data.decision.bypass_paths))
-                        ? data.decision.bypass_paths : [];
                 } catch (error) {
                     console.error('Failed to load WAF config:', error);
                     this.wafConfig = null;
-                    this.bypassPaths = [];
-                }
-            }
-
-            async addBypassPath(event) {
-                event.preventDefault();
-                const path = event.target.path.value.trim();
-                if (!path) return;
-                if (!path.startsWith('/')) {
-                    this.showPopupNotification('error', 'Invalid path', 'Path must start with "/" — e.g. /api/heartbeat', null);
-                    return;
-                }
-                if ((this.bypassPaths || []).includes(path)) {
-                    this.showPopupNotification('error', 'Duplicate', `${path} is already bypassed.`, null);
-                    return;
-                }
-                const next = [...(this.bypassPaths || []), path];
-                await this._saveBypassPaths(next, `Bypass added: ${path}`);
-                event.target.reset();
-            }
-
-            async removeBypassPath(path) {
-                const next = (this.bypassPaths || []).filter(p => p !== path);
-                await this._saveBypassPaths(next, `Bypass removed: ${path}`);
-            }
-
-            async _saveBypassPaths(list, msg) {
-                try {
-                    const body = {
-                        decision: {
-                            block_threshold:     this.wafConfig ? this.wafConfig.decision.block_threshold     : 5.0,
-                            challenge_threshold: this.wafConfig ? this.wafConfig.decision.challenge_threshold : 4.0,
-                            bypass_paths:        list
-                        },
-                        rate_limit: {
-                            requests_per_min: this.wafConfig ? this.wafConfig.rate_limit.requests_per_min : 1000,
-                            burst_size:       this.wafConfig ? this.wafConfig.rate_limit.burst_size       : 100,
-                            endpoint_limits:  (this.wafConfig && this.wafConfig.rate_limit.endpoint_limits) || {}
-                        }
-                    };
-                    const res = await authFetch(`${API_BASE}/config`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body)
-                    });
-                    const result = await res.json();
-                    if (result.success) {
-                        // Server returns the canonical (deduped) list.
-                        const synced = (result.config && result.config.decision && result.config.decision.bypass_paths) || list;
-                        this.bypassPaths = synced;
-                        if (this.wafConfig && this.wafConfig.decision) this.wafConfig.decision.bypass_paths = synced;
-                        this.showPopupNotification('success', 'Saved', msg, null);
-                        this.softRefresh();
-                    } else {
-                        this.showPopupNotification('error', 'Save failed', result.message || 'Server rejected the change', null);
-                    }
-                } catch (err) {
-                    this.showPopupNotification('error', 'Network error', err.message, null);
                 }
             }
 
@@ -3323,8 +3311,7 @@
                 const config = {
                     decision: {
                         block_threshold: parseFloat(formData.get('block_threshold')),
-                        challenge_threshold: parseFloat(formData.get('challenge_threshold')),
-                        bypass_paths: this.bypassPaths || []
+                        challenge_threshold: parseFloat(formData.get('challenge_threshold'))
                     },
                     rate_limit: {
                         requests_per_min: parseInt(formData.get('requests_per_min')),
@@ -3386,7 +3373,9 @@
                 const rpm = parseInt(event.target.rpm.value);
                 const burst = parseInt(event.target.burst.value);
 
-                if (!path || !rpm || !burst) return;
+                // Reject empty path / non-numeric inputs. 0 is intentionally
+                // allowed and means "inherit the default RPM/burst".
+                if (!path || isNaN(rpm) || isNaN(burst) || rpm < 0 || burst < 0) return;
 
                 // Update local config
                 if (!this.wafConfig.rate_limit.endpoint_limits) {

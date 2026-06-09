@@ -1,0 +1,299 @@
+\documentclass[../DoAn.tex]{subfiles}
+\begin{document}
+
+Chương này khép lại đồ án bằng ba việc: tổng kết các kết quả đạt được đối
+chiếu với mục tiêu ban đầu đề ra ở Chương \ref{section:1.2}, nhìn nhận
+thẳng thắn các hạn chế còn tồn tại của hệ thống ở thời điểm hiện tại, và
+phác thảo các hướng phát triển tiếp theo theo ba mốc thời gian: ngắn hạn
+(các việc có thể hoàn thiện trong vài tuần), trung hạn (các tính năng đòi
+hỏi thiết kế lại một số thành phần), và dài hạn (các định hướng nghiên cứu
+mở rộng cho các giai đoạn sau).
+
+% ====================================================================
+\section{Kết luận}
+\label{section:6.1}
+
+\subsection{Kết quả đạt được}
+\label{subsection:6.1.1}
+
+Sau toàn bộ quá trình thiết kế, hiện thực hóa và đánh giá, đề tài đã đạt
+được sáu kết quả cụ thể.
+
+\textbf{Thứ nhất, một hệ thống WAF reverse-proxy hoàn chỉnh viết bằng Go}
+với rule engine 78 luật bao phủ 13 nhóm tấn công OWASP. Trên harness đánh giá
+\texttt{cmd/wafeval} (46 payload đa nhóm), \textit{riêng lớp rule} chặn
+\textbf{87.0\%} (40/46) và bắt được (block + challenge) \textbf{89.1\%}
+(41/46); năm mẫu lọt là các trường hợp được thiết kế để lớp ML hoặc cơ chế
+stateful đảm nhận (chi tiết ở mục \ref{subsection:5.2.3}). Tỷ lệ false positive
+trên tập hợp lệ cố tình gây nhiễu là \textbf{3.8\%} (2/52), đáp ứng mục tiêu
+\(<\) 5\%. Latency thêm vào ở phân vị 99 là 1.2 mili giây trên toàn bộ traffic,
+đáp ứng mục tiêu \(<\) 5 mili giây.
+
+\textbf{Thứ hai, tích hợp thành công lớp ML xác minh trong vùng xám}. Mô
+hình DistilBERT fine-tuned 10 lớp (phiên bản v5 đang dùng production) đạt
+binary attack precision \textbf{0.976} và recall \textbf{0.988} trên tập
+kiểm thử out-of-distribution. Cơ chế gray-zone activation đảm bảo ML chỉ
+được gọi cho 5--10\% lưu lượng, giữ overhead latency P99 toàn cục ở mức
+không đáng kể.
+
+\textbf{Thứ ba, dashboard quản trị hoàn chỉnh}. Hệ thống có 7 trang giao
+diện (login, register, dashboard chính, settings cá nhân, user management,
+system settings, rule builder) phục vụ ba nhóm người dùng đã được xác
+định ở \ref{subsection:2.1.1}. Toàn bộ các trang đều có theme đồng nhất
+với chế độ dark/light, pre-paint script chống FOUC, và glass-card layout
+thống nhất.
+
+\textbf{Thứ tư, hệ thống xác thực và phân quyền bảo mật}. JWT lưu trong
+HttpOnly cookie với cờ Secure, bcrypt cost factor 10 cho mật khẩu, RBAC
+ba vai trò (admin/editor/viewer) với CHECK constraint ở mức DB schema.
+Endpoint \texttt{/register} công khai bịt lỗ leo thang đặc quyền (role
+luôn = viewer). Các bất biến last-admin protection và self-action protection
+được hiện thực hóa ở cả tầng handler lẫn tầng UI. Toàn bộ 10 test case
+auth (bao gồm các regression test cho lỗ leo thang) đều pass.
+
+\textbf{Thứ năm, pipeline huấn luyện ML có kiểm soát chất lượng}. Hard
+gate bốn tiêu chí (accuracy, cmdi F1, log4shell F1, binary P/R) đã thực
+sự ngăn được phiên bản v6 (accuracy 0.8866) khỏi vào production --
+chứng minh giá trị thực tế của cơ chế trong việc tránh regression. Phân
+tích root-cause của các trường hợp misclassification đã định hướng cụ thể
+nội dung của 1800 mẫu augmentation cho v6.1.
+
+\textbf{Thứ sáu, triển khai một lệnh qua Docker Compose}. Toàn bộ stack
+(WAF + ML service + PostgreSQL) khởi động bằng một dòng lệnh
+\texttt{docker compose up -d} sau khi chuẩn bị môi trường. Image Docker
+được tối ưu (WAF binary tĩnh < 30 MB) phù hợp cho mọi môi trường có hỗ
+trợ container.
+
+\subsection{Đánh giá so với mục tiêu ban đầu}
+\label{subsection:6.1.2}
+
+Bảng \ref{table:goal-vs-result} đối chiếu trực tiếp từng mục tiêu đề ra ở
+Chương \ref{section:1.2} với kết quả thực tế đạt được.
+
+\begin{table}[h!]
+\centering
+\caption{Đối chiếu mục tiêu ban đầu với kết quả đạt được}
+\label{table:goal-vs-result}
+\small
+\begin{tabular}{|p{5.5cm}|p{5cm}|c|}
+\hline
+\textbf{Mục tiêu} & \textbf{Kết quả thực tế} & \textbf{Đánh giá} \\
+\hline
+WAF reverse-proxy hiệu năng cao viết bằng Go &
+Hoàn thành, latency P99 = 1.2 ms toàn traffic &
+\checkmark Đạt \\
+\hline
+Bộ luật 78 rules / 13 nhóm OWASP &
+78/78 rule nạp; lớp rule chặn 87.0\%, bắt 89.1\% (46 payload) &
+\checkmark Đạt \\
+\hline
+Tích hợp ML (DistilBERT) trong vùng xám &
+v5 đạt P 0.976 / R 0.988, gray-zone activation hoạt động &
+\checkmark Đạt \\
+\hline
+Dashboard quản trị real-time &
+7 trang HTML, theme đồng nhất, real-time counter &
+\checkmark Đạt \\
+\hline
+Pipeline huấn luyện ML tái lập &
+Hard gate, augmentation chiến lược, versioning rõ ràng &
+\checkmark Đạt \\
+\hline
+Block rate \(\ge\) 95\% (mục tiêu hệ thống) &
+Lớp rule: 87.0\% block / 89.1\% bắt (41/46); 5 ca biên chuyển ML &
+\(\triangle\) Đạt một phần (chưa đo kèm ML) \\
+\hline
+False positive \(<\) 5\% &
+3.8\% (2/52) trên tập đối nghịch &
+\checkmark Đạt \\
+\hline
+Hard gate model v6 đạt accuracy \(\ge\) 0.92 &
+v6 accuracy 0.8866 (fail), v5 đang dùng &
+\(\triangle\) Chưa đạt với v6 \\
+\hline
+Rate limiting hiệu quả &
+Block rate 65.6\% với burst 1500 &
+\(\triangle\) Cần tune thêm \\
+\hline
+Triển khai qua Docker Compose &
+\texttt{docker compose up -d}, image WAF \(<\) 30 MB &
+\checkmark Đạt \\
+\hline
+\end{tabular}
+\end{table}
+
+Tổng cộng bảy trên mười mục tiêu đã được hoàn thành; ba mục tiêu còn lại
+(block rate \(\ge\) 95\% ở mức hệ thống, model v6, và rate limiting tối ưu)
+ở trạng thái đạt một phần với kế hoạch rõ ràng để hoàn thiện. Riêng block
+rate: lớp rule đã bắt 89.1\% và năm ca biên được thiết kế để lớp ML xác minh
+đảm nhận; việc đo block rate end-to-end (rule + ML) là bước đánh giá kế tiếp.
+
+\subsection{Hạn chế}
+\label{subsection:6.1.3}
+
+Đề tài không né tránh các hạn chế còn tồn tại của hệ thống. Bốn hạn chế
+chính cần được nêu rõ ràng để định hướng các bước tiếp theo và để người
+sử dụng tương lai có hiểu biết chính xác về phạm vi áp dụng.
+
+\textbf{Hạn chế 1 -- Model ML phiên bản v6 chưa đạt hard gate}. Mặc dù v5
+đang phục vụ production với binary metric chấp nhận được, đường lên v6 đã
+gặp một bước thoái lui không lường trước (accuracy giảm 4\% so với v5).
+Hệ thống hiện chưa có một mô hình ML đạt đầy đủ năm tiêu chí gate; v6.1
+đang trong giai đoạn kế hoạch với 1800 mẫu augmentation mục tiêu.
+
+\textbf{Hạn chế 2 -- Chưa kiểm thử với traffic production thực tế}. Toàn
+bộ đánh giá hiện tại dựa trên DVWA, Juice Shop, và các traffic synthetic
+được sinh từ template. Hệ thống chưa được triển khai trên một ứng dụng
+sản xuất với traffic thật, lưu lượng đa dạng, và nhiều phân phối payload
+khác nhau. Có thể sẽ xuất hiện các vấn đề (false positive, edge case rule
+không cover, vấn đề performance) chỉ lộ ra khi gặp traffic thực tế.
+
+\textbf{Hạn chế 3 -- Rate limiting hiện chỉ đạt 65.6\% với burst 1500}.
+Với một burst lớn vượt nhiều lần burst size cấu hình, vẫn có 34.4\% request
+lọt qua. Mặc dù chấp nhận được với mục tiêu cản trở brute-force, kết quả
+này cho thấy thuật toán Token Bucket per-IP đơn lẻ không đủ để chống các
+tấn công DDoS volumetric. Cần kết hợp với lớp bảo vệ ở tầng cao hơn (CDN,
+LB rate limit) hoặc nâng cấp sang thuật toán phức tạp hơn.
+
+\textbf{Hạn chế 4 -- Phạm vi inspection chỉ tới REQUEST}. Hệ thống chỉ
+kiểm tra request đầu vào, không kiểm tra response đầu ra. Điều này nghĩa
+là không phát hiện được các trường hợp data leak (server vô tình trả về
+SQL error chứa schema), hoặc các pattern phản ánh tấn công thành công
+(stack trace, internal IP trong response body). Đây là một lớp bảo vệ
+quan trọng mà các WAF thương mại đều có nhưng đề tài chưa hiện thực hóa.
+
+% ====================================================================
+\section{Hướng phát triển}
+\label{section:6.2}
+
+Dựa trên các kết quả đạt được, các hạn chế đã nêu, và quan sát về hệ sinh
+thái WAF rộng hơn, đề tài đề xuất ba lộ trình phát triển theo các mốc
+thời gian khác nhau.
+
+\subsection{Hướng ngắn hạn (1--3 tháng)}
+\label{subsection:6.2.1}
+
+Các nhiệm vụ ngắn hạn tập trung vào việc hoàn thiện những gì đã bắt đầu
+trong đề tài và đóng các hạn chế đã được xác định rõ.
+
+\textbf{Hoàn thiện model v6.1}. Sinh 1800 mẫu augmentation có mục tiêu
+giải quyết ba failure pattern của v6 (JSON-body bias, shell URL paths,
+log4shell obfuscation -- chi tiết ở \ref{subsection:4.6.3}). Huấn luyện
+v6.1 và đánh giá theo hard gate đầy đủ. Mục tiêu cụ thể: accuracy
+\(\ge\) 0.92, cmdi F1 \(\ge\) 0.85, log4shell F1 \(\ge\) 0.90, binary P/R
+\(\ge\) 0.95. Nếu đạt, deploy v6.1 thay thế v5 trong production.
+
+\textbf{Cải thiện rate limiting}. Thay thuật toán Token Bucket đơn lẻ
+bằng kết hợp \textit{Sliding Window Counter + Token Bucket}: Sliding
+Window cho rate trung bình chính xác hơn, Token Bucket cho khả năng burst.
+Đồng thời chuyển store từ in-memory sang \textbf{Redis-backed} để hỗ trợ
+multi-instance deployment (các WAF instance share state qua Redis, không
+bị bypass khi attacker rotate qua nhiều instance).
+
+\textbf{Thêm RESPONSE phase inspection}. Bổ sung một bước trong middleware
+stack kiểm tra response trước khi trả về client. Các pattern cần kiểm: SQL
+error message (PostgreSQL/MySQL/MSSQL stack trace), file path leak
+(\texttt{/etc/passwd}, \texttt{C:\textbackslash Windows}), stack trace
+Java/PHP/Python với class name hệ thống. Khi phát hiện, có thể sanitize
+response (thay error message generic) hoặc gửi cảnh báo cho admin.
+
+\textbf{Tích hợp Prometheus/Grafana dashboard}. Mặc dù hệ thống đã xuất
+metric ở định dạng Prometheus qua \texttt{/metrics}, chưa có Grafana
+dashboard chuẩn để visualize. Bổ sung file \texttt{grafana/dashboard.json}
+mô tả 8--10 panel chính: requests/s, block rate, top attack categories,
+ML latency distribution, rate limiter activity, audit log volume.
+
+\subsection{Hướng trung hạn (3--12 tháng)}
+\label{subsection:6.2.2}
+
+Các nhiệm vụ trung hạn yêu cầu thiết kế lại hoặc bổ sung các thành phần
+mới với ảnh hưởng vượt ra ngoài phạm vi một tính năng đơn lẻ.
+
+\textbf{Kiến trúc plugin: rule engine có thể mở rộng qua Lua hoặc WASM}.
+Hiện tại, mọi rule đều phải tuân thủ một schema JSON cố định -- không
+hỗ trợ logic tùy chỉnh phức tạp (ví dụ: ``nếu request có cookie X VÀ
+header Y thì áp dụng rule Z''). Một kiến trúc plugin với engine nhúng Lua
+(sử dụng \texttt{gopher-lua}) hoặc WASM (qua \texttt{wazero}) sẽ cho phép
+người dùng cao cấp viết rule với điều kiện và transform tùy ý mà vẫn duy
+trì isolation an toàn.
+
+\textbf{Active learning từ false positive/negative do admin label}. Hiện
+tại, audit log chỉ là dữ liệu một chiều: model đánh giá traffic, admin
+xem log. Bổ sung cơ chế cho phép admin ``flag'' một bản ghi log là
+\textit{false positive} (model sai khi block normal) hoặc \textit{false
+negative} (model sai khi allow attack). Các bản ghi đã flag được tích lũy
+thành tập huấn luyện bổ sung, định kỳ kích hoạt một lần fine-tune nhẹ.
+Đây là vòng phản hồi \textit{human-in-the-loop} đặc trưng cho các hệ
+thống ML production.
+
+\textbf{Clustering mode: shared state qua Redis}. Hiện tại, mỗi WAF instance
+hoạt động độc lập -- rate limiter, blacklist động, ML cache không được
+share. Trong môi trường có nhiều instance phía sau load balancer, attacker
+có thể rotate qua các instance để tăng burst limit hiệu quả. Chuyển các
+shared state quan trọng sang Redis (rate limit bucket, IP blacklist hit
+counter, ML response cache) để các instance hoạt động như một cluster
+logic đồng nhất.
+
+\textbf{Hỗ trợ HTTP/2 và HTTP/3 native}. Hiện tại, hệ thống dùng
+\texttt{httputil.ReverseProxy} hỗ trợ HTTP/1.1 và HTTP/2. HTTP/3 (QUIC)
+đang được triển khai rộng rãi, và một WAF không hỗ trợ HTTP/3 sẽ bị bypass
+khi client và backend chuyển sang giao thức này. Thư viện
+\texttt{quic-go} đã trưởng thành đủ để tích hợp.
+
+\subsection{Hướng dài hạn (12 tháng trở lên)}
+\label{subsection:6.2.3}
+
+Các định hướng dài hạn mang tính chất nghiên cứu hơn là phát triển sản
+phẩm; chúng có thể trở thành các đề tài nghiên cứu riêng biệt.
+
+\textbf{Tích hợp threat intelligence feed}. Kết nối hệ thống với các nguồn
+threat intelligence công cộng (AbuseIPDB, MISP, Spamhaus DROP list) và
+thương mại (CrowdStrike, Recorded Future). IP reputation, malware URL,
+known TOR exit node được tự động sync và áp dụng cho engine với policy
+được cấu hình. Đây là một trong những lợi thế cốt lõi của WAF thương mại
+mà giải pháp mã nguồn mở cần lấp đầy.
+
+\textbf{Zero-day detection bằng unsupervised anomaly detection}. Bổ sung
+một lớp model thứ hai song song với DistilBERT: unsupervised model
+(autoencoder hoặc one-class SVM trên embedding) được huấn luyện chỉ trên
+traffic normal. Bất kỳ request nào lệch xa khỏi cluster normal đều được
+flag, ngay cả khi không match bất kỳ rule hay nhãn tấn công nào đã biết.
+Đây là cơ chế bắt zero-day mà supervised model không thể có (vì supervised
+chỉ biết các lớp đã được label).
+
+\textbf{Compliance reporting cho PCI-DSS, GDPR, ISO 27001}. Các tổ chức
+chịu sự ràng buộc của các tiêu chuẩn tuân thủ thường yêu cầu báo cáo
+định kỳ về các sự kiện bảo mật, log retention theo thời gian quy định,
+và evidence của các biện pháp phòng chống. Hệ thống có thể bổ sung module
+sinh báo cáo theo template chuẩn của từng tiêu chuẩn, audit trail không
+thể chỉnh sửa (write-once log), và policy retention tự động.
+
+\textbf{Phân tích hành vi người dùng (User Behavior Analytics -- UBA)}.
+Theo dõi pattern truy cập của từng người dùng đã đăng nhập (sequence các
+endpoint, thời gian giữa request, geolocation của IP) và detect các bất
+thường (đăng nhập từ vị trí mới, truy cập endpoint không thường lệ, hành
+vi giống bot). UBA bổ sung một chiều bảo vệ khác cho lớp authentication
+mà mật khẩu và JWT đơn lẻ không cung cấp được.
+
+\textbf{Mở rộng sang API Gateway với schema validation}. Đối với các API
+RESTful/GraphQL, hệ thống có thể đọc OpenAPI/GraphQL schema và validate
+mọi request có đúng cấu trúc, kiểu dữ liệu, và phạm vi giá trị hay không.
+Đây là một dạng phòng thủ chủ động vượt ra ngoài pattern matching: từ
+chối request không tuân thủ schema ngay cả khi không trigger rule nào.
+
+\bigskip
+\noindent\textbf{Kết chương.}
+Đồ án đã hoàn thành phần lớn các mục tiêu đề ra: một hệ thống WAF mã nguồn
+mở hiệu năng cao, tích hợp đầy đủ rule engine, lớp ML xác minh, dashboard
+quản trị, lớp xác thực bảo mật, và pipeline huấn luyện có kiểm soát chất
+lượng. Sáu kết quả cụ thể đã được trình bày kèm số liệu định lượng. Bốn
+hạn chế tồn tại được nhìn nhận thẳng thắn và đều có kế hoạch khắc phục
+trong giai đoạn ngắn hạn hoặc trung hạn. Mười ba định hướng phát triển
+được đề xuất, trải đều ba mốc thời gian, mở đường cho việc tiếp tục đề
+tài thành một dự án nghiên cứu và phát triển dài hạn hơn. Hệ thống ở trạng
+thái hiện tại đã sẵn sàng làm nền tảng cho các thử nghiệm tiếp theo trong
+môi trường giáo dục và lab, và là một bước đệm hợp lý hướng tới một sản
+phẩm mã nguồn mở có thể triển khai trong môi trường sản xuất sau khi hoàn
+thiện các hạng mục ngắn hạn đã nêu.
+
+\end{document}

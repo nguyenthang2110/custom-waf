@@ -287,17 +287,26 @@ func (de *DecisionEngine) DecideWithDetails(
 	// Step 5: Override with behavior recommendation if critical
 	if behaviorResult != nil && behaviorResult.ThreatDetected {
 		if behaviorResult.RecommendAction == "BLOCK" && result.Decision != "BLOCK" {
+			// Capture the original decision BEFORE overwriting, otherwise
+			// the stat-adjust branches below would all compare against
+			// "BLOCK" and never decrement the original counter — the
+			// previous version inflated AllowCount/ChallengeCount whenever
+			// behavior detection escalated a request to BLOCK.
+			origDecision := result.Decision
+
 			result.Decision = "BLOCK"
 			result.Reason = "Overridden by behavior detection: " +
 				de.formatThreatTypes(behaviorResult.ThreatTypes)
 			result.ResponseCode = 403
 
 			de.updateStats(func() {
-				// Adjust stats
-				if result.Decision == "ALLOW" {
+				switch origDecision {
+				case "ALLOW":
 					de.stats.AllowCount--
-				} else if result.Decision == "CHALLENGE" {
+				case "CHALLENGE":
 					de.stats.ChallengeCount--
+				case "LOG":
+					de.stats.LogCount--
 				}
 				de.stats.BlockCount++
 			})

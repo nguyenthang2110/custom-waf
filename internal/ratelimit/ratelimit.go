@@ -2,6 +2,7 @@
 package ratelimit
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,20 +18,30 @@ type RateLimiter struct {
 	stopCleanup     chan bool
 }
 
-// RateLimitConfig defines rate limiting configuration
+// RateLimitConfig defines rate limiting configuration.
+//
+// Behavior: rate limiting is OPT-IN per path. A request is only throttled
+// when its route matches an entry in EndpointLimits — either by exact
+// path or by subtree-prefix (entries ending in "/", same convention as
+// http.ServeMux). Anything that doesn't match passes through with no
+// per-IP bookkeeping. RequestsPerMin / BurstSize are *default fallbacks*
+// used when an EndpointLimits entry leaves those fields at zero.
 type RateLimitConfig struct {
-	RequestsPerMin  int                    // Max requests per minute per client (Global)
-	BurstSize       int                    // Maximum burst size (token bucket capacity)
+	RequestsPerMin  int                    // Default rpm applied to endpoint entries with rpm=0
+	BurstSize       int                    // Default burst applied to endpoint entries with burst=0
 	CleanupInterval time.Duration          // How often to cleanup old entries
 	RouteEnabled    bool                   // Enable per-route rate limiting (Legacy/Additional)
 	RouteLimit      int                    // Requests per minute per route
-	EndpointLimits  map[string]LimitConfig // Specific limits per endpoint
+	EndpointLimits  map[string]LimitConfig // Per-endpoint limits (opt-in; empty = no rate limiting)
 }
 
-// LimitConfig defines rate limit for a specific context
+// LimitConfig defines rate limit for a specific context. JSON tags are
+// snake_case so endpoint_limits round-trip cleanly through the dashboard
+// (POST /waf-api/config) and the persisted config store. Without them
+// the decoder would silently zero the fields on every save.
 type LimitConfig struct {
-	RequestsPerMin int
-	BurstSize      int
+	RequestsPerMin int `json:"requests_per_min"`
+	BurstSize      int `json:"burst_size"`
 }
 
 // clientBucket tracks rate limit state for a single client IP
@@ -82,85 +93,124 @@ func (rl *RateLimiter) IsRateLimited(clientIP string) bool {
 	return rl.IsRateLimitedWithRoute(clientIP, "")
 }
 
-// IsRateLimitedWithRoute checks rate limit for client IP and optional route
+// IsRateLimitedWithRoute checks the rate limit for (clientIP, route).
+//
+// Rate limiting is opt-in: a request is only throttled when its route
+// matches an entry in config.EndpointLimits. An unconfigured route returns
+// false immediately and creates no bookkeeping. This means an empty
+// endpoint_limits map means "no rate limiting anywhere" — the safest
+// default for a WAF that sits in front of arbitrary traffic.
+//
+// Matching is exact first, then subtree-prefix for entries ending in "/"
+// (the longest such pattern wins, matching net/http.ServeMux semantics).
+// The bucket is keyed by the matched *pattern*, so a single "/api/auth/"
+// entry shares one bucket across all requests under that subtree per
+// client IP — operators get one knob, not N hidden buckets.
 func (rl *RateLimiter) IsRateLimitedWithRoute(clientIP, route string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	now := time.Now()
 
-	// 1. Check Endpoint-Specific Limits
-	// If the route matches a specific endpoint config, we use that bucket INSTEAD of global
-	// This allows setting higher or lower limits for specific paths
-	var usedBucket *clientBucket
-	var rpm int
-	var burst int
-
-	// Simple exact match for now (can be enhanced to prefix match later if needed)
-	if limitConfig, ok := rl.config.EndpointLimits[route]; ok {
-		// Ensure map exists for this endpoint
-		if rl.endpointBuckets == nil {
-			rl.endpointBuckets = make(map[string]map[string]*clientBucket)
-		}
-		if rl.endpointBuckets[route] == nil {
-			rl.endpointBuckets[route] = make(map[string]*clientBucket)
-		}
-
-		bucket, exists := rl.endpointBuckets[route][clientIP]
-		if !exists {
-			bucket = &clientBucket{
-				tokens:       limitConfig.BurstSize,
-				lastRefill:   now,
-				firstRequest: now,
-				lastRequest:  now,
-			}
-			rl.endpointBuckets[route][clientIP] = bucket
-		}
-		usedBucket = bucket
-		rpm = limitConfig.RequestsPerMin
-		burst = limitConfig.BurstSize
-	} else {
-		// 2. Global Limit (Fallback)
-		bucket, exists := rl.clients[clientIP]
-		if !exists {
-			bucket = &clientBucket{
-				tokens:       rl.config.BurstSize,
-				lastRefill:   now,
-				firstRequest: now,
-				lastRequest:  now,
-			}
-			rl.clients[clientIP] = bucket
-		}
-		usedBucket = bucket
-		rpm = rl.config.RequestsPerMin
-		burst = rl.config.BurstSize
+	limitConfig, matchedKey, ok := rl.matchEndpointLocked(route)
+	if !ok {
+		// No matching endpoint pattern → not rate limited. We intentionally
+		// don't even touch the clients map here; an unconfigured path
+		// should leave zero footprint so attackers can't poison memory by
+		// spraying random URLs.
+		return false
 	}
 
-	// Refill tokens
-	rl.refillTokensWithConfig(usedBucket, now, rpm, burst)
+	// Fall back to global defaults for any field the operator left at zero
+	// in the endpoint entry — saves them from repeating the same numbers
+	// across every endpoint when most should share one limit.
+	rpm := limitConfig.RequestsPerMin
+	burst := limitConfig.BurstSize
+	if rpm == 0 {
+		rpm = rl.config.RequestsPerMin
+	}
+	if burst == 0 {
+		burst = rl.config.BurstSize
+	}
+	// If even the global defaults are zero we have no usable limit; treat
+	// as "configured but inert" rather than crashing or dividing by zero.
+	if rpm <= 0 || burst <= 0 {
+		return false
+	}
 
-	// Update tracking
-	usedBucket.requestCount++
-	usedBucket.lastRequest = now
+	if rl.endpointBuckets == nil {
+		rl.endpointBuckets = make(map[string]map[string]*clientBucket)
+	}
+	if rl.endpointBuckets[matchedKey] == nil {
+		rl.endpointBuckets[matchedKey] = make(map[string]*clientBucket)
+	}
 
-	// Check limit
-	if usedBucket.tokens <= 0 {
-		usedBucket.blockedCount++
+	bucket, exists := rl.endpointBuckets[matchedKey][clientIP]
+	if !exists {
+		bucket = &clientBucket{
+			tokens:       burst,
+			lastRefill:   now,
+			firstRequest: now,
+			lastRequest:  now,
+		}
+		rl.endpointBuckets[matchedKey][clientIP] = bucket
+	}
+
+	rl.refillTokensWithConfig(bucket, now, rpm, burst)
+
+	bucket.requestCount++
+	bucket.lastRequest = now
+
+	if bucket.tokens <= 0 {
+		bucket.blockedCount++
 		return true
 	}
 
-	usedBucket.tokens--
+	bucket.tokens--
 
-	// 3. Legacy/Secondary Route Rate Limit (Shared across all IPs)
-	// This protects the route itself from total traffic overload, regardless of IP
+	// Legacy/Secondary Route Rate Limit (Shared across all IPs). Protects
+	// the route itself from total traffic overload regardless of IP. Off
+	// by default; only kicks in when config.RouteEnabled is set.
 	if rl.config.RouteEnabled && route != "" {
 		if rl.isRouteLimited(route, now) {
-			usedBucket.blockedCount++ // Credit the block to the user too
+			bucket.blockedCount++
 			return true
 		}
 	}
 
 	return false
+}
+
+// matchEndpointLocked resolves route to its EndpointLimits entry.
+//
+// Exact match wins. Otherwise, among keys ending in "/" (subtree
+// patterns), the longest one that prefixes route wins. Caller must hold
+// rl.mu (read or write — we only read rl.config here).
+func (rl *RateLimiter) matchEndpointLocked(route string) (LimitConfig, string, bool) {
+	if route == "" || len(rl.config.EndpointLimits) == 0 {
+		return LimitConfig{}, "", false
+	}
+	if lc, ok := rl.config.EndpointLimits[route]; ok {
+		return lc, route, true
+	}
+	var bestKey string
+	var bestLC LimitConfig
+	for k, v := range rl.config.EndpointLimits {
+		if !strings.HasSuffix(k, "/") {
+			continue
+		}
+		if !strings.HasPrefix(route, k) {
+			continue
+		}
+		if len(k) > len(bestKey) {
+			bestKey = k
+			bestLC = v
+		}
+	}
+	if bestKey == "" {
+		return LimitConfig{}, "", false
+	}
+	return bestLC, bestKey, true
 }
 
 // refillTokensWithConfig adds tokens based on dynamic config
