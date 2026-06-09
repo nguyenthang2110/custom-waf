@@ -154,8 +154,7 @@ Phạm vi của đề tài bao gồm:
 \label{section:1.3}
 
 Từ mục tiêu và phạm vi đã xác định, đề tài đề xuất kiến trúc giải pháp dựa trên
-hai nguyên tắc cốt lõi: \textit{hiệu năng không thỏa hiệp ở đường nhanh} và
-\textit{độ chính xác tăng cường ở trường hợp mơ hồ}.
+hai lớp chính :
 
 \textbf{Lớp thứ nhất -- Rule Engine với Anomaly Scoring.} Toàn bộ logic xử lý
 WAF được xây dựng bằng ngôn ngữ Go (Golang). Go là ngôn ngữ biên dịch tĩnh,
@@ -171,9 +170,8 @@ một chuỗi tín hiệu tấn công dù mỗi cái yếu vẫn có thể tích
 hoạt quyết định phòng thủ. Để chống evasion qua encoding, mỗi rule được trang
 bị một chuỗi transform (biến đổi tiền xử lý) áp dụng theo thứ tự -- ví dụ
 \texttt{URL\_DECODE → LOWERCASE → COMPRESS\_WHITESPACE} -- trước
-khi tiến hành so khớp mẫu. Bộ luật của hệ thống gồm 78 rule -- kết hợp tầng
-chữ ký tấn công chuẩn và tầng dấu hiệu (\textit{indicator}) tích lũy -- bao phủ
-13 nhóm tấn công, được xây dựng theo cấu trúc JSON có phiên bản, dễ mở rộng
+khi tiến hành so khớp mẫu. Bộ luật ban đầu của hệ thống gồm 36 rule bao phủ
+12 nhóm tấn công, được xây dựng theo cấu trúc JSON có phiên bản, dễ mở rộng
 và thay thế không cần biên dịch lại.
 
 \textbf{Lớp thứ hai -- Mô hình học máy trong vùng xám.} Quan sát thực tế cho
@@ -242,7 +240,7 @@ trên các tập payload tấn công chuẩn, bài kiểm thử tải và kiểm
 
 Chương 5 tổng hợp và thảo luận sâu về bốn đóng góp nổi bật của đề tài: cơ chế
 anomaly scoring hai lớp với ML gray-zone activation; transform chain chống evasion
-và tập luật 78 rules; pipeline fine-tuning DistilBERT với hard gate kiểm soát chất
+và tập luật 36 rules; pipeline fine-tuning DistilBERT với hard gate kiểm soát chất
 lượng; và thiết kế interface tách biệt engine và ML client phục vụ khả năng kiểm
 thử và mở rộng.
 

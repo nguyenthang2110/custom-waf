@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "waf-https-proxy",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["-e", "const http=require('http'),https=require('https'),tls={rejectUnauthorized:false}; http.createServer((q,r)=>{const t=https.request({hostname:'127.0.0.1',port:8443,path:q.url,method:q.method,headers:q.headers,rejectUnauthorized:false},u=>{r.writeHead(u.statusCode,u.headers); u.pipe(r)}); q.pipe(t); t.on('error',e=>{r.statusCode=502; r.end(String(e))})}).listen(7777,()=>console.log('proxy on 7777'))"],
+      "port": 7777
+    }
+  ]
+}

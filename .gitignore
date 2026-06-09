@@ -24,8 +24,6 @@
 !.vscode/settings.json
 *.swp
 
-# Claude session metadata (worktrees, plans, etc.)
-.claude/
 
 # Local secrets
 *.local.yaml

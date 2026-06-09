@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm /Users/nguyenthang/waf-project/docs/rules/RULE_SPEC.md /Users/nguyenthang/waf-project/docs/rules/ENGINE_DESIGN.md /Users/nguyenthang/waf-project/docs/rules/README.md /Users/nguyenthang/waf-project/docs/rules/examples/*.json /Users/nguyenthang/waf-project/docs/rules/examples/INDEX.md && ls /Users/nguyenthang/waf-project/docs/rules/ /Users/nguyenthang/waf-project/docs/rules/examples/)"
+    ]
+  }
+}
