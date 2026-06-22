@@ -69,27 +69,37 @@ waf-project/
 *   **Docker** & **Docker Compose** (chạy PostgreSQL)
 *   **Python** 3.10+ (chạy ML service)
 *   **Make** (Linux/macOS, hoặc WSL2/Git Bash trên Windows)
-*   **Model DistilBERT v8** đặt tại `model_v8/final_model_v8/` (~268MB, không kèm trong repo)
+*   **Model DistilBERT v8** đặt tại `model_v8/final_model_v8/` (không kèm trong repo — xem Bước 1)
 
-### Bước 1: Cấu hình
+### Bước 1: Tải model
+Model không commit trong git. Tải bản đóng gói từ GitHub Release rồi giải nén:
+```bash
+gh release download model-v8 -p '*.zip'        # hoặc tải tay từ trang Releases
+unzip 'model_v8-*.zip' -d .                     # tạo ra model_v8/final_model_v8/
+```
+Trang tải: <https://github.com/nguyenthang2110/custom-waf/releases/tag/model-v8>
+
+Đường dẫn sau khi giải nén phải khớp `MODEL_DIR` mặc định: `model_v8/final_model_v8/`.
+
+### Bước 2: Cấu hình
 Chỉnh `configs/config.yaml`:
 *   `upstream.url` — backend cần bảo vệ (mặc định `http://127.0.0.1:3000`)
 *   `auth.jwt_secret` — thay chuỗi mới cho môi trường ngoài localhost
 *   `database.*` — khớp với credential PostgreSQL
 *   `admin.allowed_cidrs` — thêm subnet nếu cần quản trị từ máy khác
 
-### Bước 2: Database
+### Bước 3: Database
 ```bash
 make db-start
 ```
 
-### Bước 3: ML Service
+### Bước 4: ML Service
 ```bash
 make ml-install
 make ml-start MODEL_DIR=/abs/path/to/final_model_v8
 ```
 
-### Bước 4: Chứng chỉ SSL
+### Bước 5: Chứng chỉ SSL
 Repo đã kèm `configs/certs/cert.pem` & `key.pem`. Tạo lại khi cần:
 ```bash
 mkdir -p configs/certs
@@ -98,7 +108,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
 chmod 600 configs/certs/key.pem
 ```
 
-### Bước 5: Build & Run
+### Bước 6: Build & Run
 ```bash
 make build
 make run MODEL_DIR=/abs/path/to/final_model_v8
