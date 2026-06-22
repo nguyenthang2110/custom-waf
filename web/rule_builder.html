@@ -4,6 +4,17 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Rule Builder · WAF</title>
+<script>
+  // Pre-paint theme bootstrap — applies the saved theme BEFORE first paint
+  // to avoid a flash. Must use the SAME localStorage key ('waf_theme') as
+  // the dashboard and the other pages so the choice stays in sync.
+  (function () {
+    try {
+      var t = localStorage.getItem('waf_theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+    } catch (_) { document.documentElement.setAttribute('data-theme', 'dark'); }
+  })();
+</script>
 <script src="https://cdn.tailwindcss.com"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -647,11 +658,6 @@ body.embed .app { padding-top: 16px; }
             <span class="switch"></span>
             <span class="lbl">Force block</span>
           </label>
-          <label class="toggle">
-            <input type="checkbox" id="f_challenge">
-            <span class="switch"></span>
-            <span class="lbl">Challenge</span>
-          </label>
         </div>
         <div class="hint" style="margin-top:6px">Force block bỏ qua tổng score — chỉ dùng cho pattern rất chắc chắn (CVE virtual patch).</div>
 
@@ -876,7 +882,6 @@ const DEFAULT_RULE = () => ({
     labels: [],
     log: true,
     block: false,
-    challenge: false,
     ml_confirm: {
       enabled: false,
       input: 'body',
@@ -1361,7 +1366,6 @@ function bindAll() {
   bindChipInput('f_labelsInput', 'f_labels', () => rule.action.labels, v => { rule.action.labels = v; });
   $('f_log').onchange = e => { rule.action.log = e.target.checked; update(); };
   $('f_block').onchange = e => { rule.action.block = e.target.checked; update(); };
-  $('f_challenge').onchange = e => { rule.action.challenge = e.target.checked; update(); };
 
   // ML
   $('f_mlEnabled').onchange = e => {
@@ -1453,7 +1457,6 @@ function applyToForm() {
   $('f_score').value = rule.action.score ?? 0;
   $('f_log').checked = !!rule.action.log;
   $('f_block').checked = !!rule.action.block;
-  $('f_challenge').checked = !!rule.action.challenge;
 
   $('f_mlEnabled').checked = !!rule.action.ml_confirm.enabled;
   $('mlBox').style.display = rule.action.ml_confirm.enabled ? 'block' : 'none';
@@ -1670,7 +1673,6 @@ function validate(r) {
   // Action
   if (r.action) {
     if (typeof r.action.score !== 'number' || r.action.score < 0) warns.push('action.score < 0 — rule sẽ trừ điểm khi match');
-    if (r.action.block && r.action.challenge) warns.push('action.block và action.challenge đều true — block sẽ thắng');
     if (r.action.ml_confirm && r.action.ml_confirm.enabled) {
       const conf = r.action.ml_confirm.min_confidence;
       if (typeof conf !== 'number' || conf < 0 || conf > 1) errs.push('action.ml_confirm.min_confidence: phải 0..1');
@@ -1910,11 +1912,13 @@ function toggleTheme() {
   const cur = document.documentElement.getAttribute('data-theme') || 'dark';
   const next = cur === 'dark' ? 'light' : 'dark';
   document.documentElement.setAttribute('data-theme', next);
-  localStorage.setItem('waf-theme', next);
+  // Same key as the dashboard ('waf_theme') so the theme stays in sync
+  // across pages.
+  localStorage.setItem('waf_theme', next);
 }
 function initTheme() {
-  const saved = localStorage.getItem('waf-theme');
-  if (saved) document.documentElement.setAttribute('data-theme', saved);
+  const saved = localStorage.getItem('waf_theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved === 'light' ? 'light' : 'dark');
   else document.documentElement.setAttribute('data-theme', 'dark');
 }
 

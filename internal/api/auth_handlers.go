@@ -19,8 +19,8 @@ import (
 )
 
 // minPasswordLen is the floor for any password the server will accept,
-// applied uniformly to /register, admin-create, admin-reset, and the
-// self-service /me/password change.
+// applied uniformly to admin-create, admin-reset, and the self-service
+// /me/password change.
 const minPasswordLen = 8
 
 // usernameRe is the allow-list for usernames. Letters / digits / dot /
@@ -30,8 +30,8 @@ const minPasswordLen = 8
 var usernameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{3,32}$`)
 
 // validateUsername returns a non-nil error if s isn't a safe username.
-// Used at /register and admin-create — username is immutable so this
-// only runs on initial creation.
+// Used at admin-create — username is immutable so this only runs on
+// initial creation.
 func validateUsername(s string) error {
 	if !usernameRe.MatchString(s) {
 		return fmt.Errorf("username must be 3-32 chars of letters, digits, dot, underscore or dash")
@@ -57,16 +57,6 @@ func validateEmail(s string) error {
 		return fmt.Errorf("email must not include a display name")
 	}
 	return nil
-}
-
-// RegisterRequest represents the PUBLIC registration request body.
-// Note: any `role` field sent by a client is intentionally IGNORED by
-// handleRegister — public sign-up always creates a viewer. Admins use
-// POST /waf-api/auth/users to create elevated accounts.
-type RegisterRequest struct {
-	Username string `json:"username"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
 }
 
 // AdminCreateUserRequest is the body for POST /waf-api/auth/users (admin
@@ -119,75 +109,11 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// handleRegister handles user registration
-func (s *APIServer) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeErrorJSON(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErrorJSON(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-	req.Username = strings.TrimSpace(req.Username)
-	req.Email = strings.TrimSpace(req.Email)
-
-	// Validate input
-	if req.Username == "" || req.Email == "" || req.Password == "" {
-		writeErrorJSON(w, "Username, email, and password are required", http.StatusBadRequest)
-		return
-	}
-	if err := validateUsername(req.Username); err != nil {
-		writeErrorJSON(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := validateEmail(req.Email); err != nil {
-		writeErrorJSON(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Validate password strength
-	if len(req.Password) < minPasswordLen {
-		writeErrorJSON(w, fmt.Sprintf("Password must be at least %d characters", minPasswordLen), http.StatusBadRequest)
-		return
-	}
-
-	// SECURITY: public registration is HARD-CODED to viewer. Any `role`
-	// field a client sends is dropped on the floor. Elevated roles are
-	// created exclusively via POST /waf-api/auth/users (admin-gated).
-	// This closes the privilege-escalation hole where anonymous users
-	// could self-promote to admin by setting `"role":"admin"` in the body.
-	const role = "viewer"
-
-	// Create user in database
-	user, err := s.userRepo.Create(req.Username, req.Email, req.Password, role, s.bcryptCost)
-	if err != nil {
-		if isUniqueViolation(err) {
-			writeErrorJSON(w, "Username or email already exists", http.StatusConflict)
-			return
-		}
-		writeErrorJSON(w, fmt.Sprintf("Failed to create user: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Log the registration event
-	s.auditLogger.LogSystemEvent("USER_REGISTERED",
-		fmt.Sprintf("New user registered: %s (email: %s, role: %s)", user.Username, user.Email, user.Role))
-
-	// Return user (without password hash)
-	writeJSON(w, map[string]interface{}{
-		"success": true,
-		"message": "User registered successfully",
-		"user": map[string]interface{}{
-			"id":       user.ID,
-			"username": user.Username,
-			"email":    user.Email,
-			"role":     user.Role,
-		},
-	})
-}
+// NOTE: public self-registration has been removed by design. Accounts are
+// created only by an admin through handleAdminCreateUser (POST
+// /waf-api/auth/users). The first admin account (admin/admin) is seeded by
+// a database migration. This eliminates the anonymous sign-up surface
+// entirely — there is no untrusted code path that creates a user.
 
 // dummyBcryptHash is a real bcrypt hash of a random string, generated at
 // package init. When /login can't find the requested user, we still spend
@@ -513,8 +439,8 @@ func (s *APIServer) handleListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAdminCreateUser creates a user with an explicit role. Admin-only.
-// This is the legitimate replacement for the role escalation that
-// /waf-api/auth/register used to permit.
+// This is the ONLY way a user account is created — public self-registration
+// was removed, so every account is provisioned by an existing admin.
 func (s *APIServer) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 	var req AdminCreateUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

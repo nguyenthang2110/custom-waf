@@ -5,11 +5,11 @@
 GOCACHE_DIR := $(CURDIR)/.gocache
 
 # ML service config — override on the command line, e.g.
-#   make run MODEL_DIR=/path/to/final_model_v3
+#   make run MODEL_DIR=/path/to/final_model_v7
 ML_VENV    ?= $(CURDIR)/.venv
 ML_HOST    ?= 127.0.0.1
 ML_PORT    ?= 8000
-MODEL_DIR  ?= /Users/nguyenthang/BERT/model/final_model_v3
+MODEL_DIR  ?= $(CURDIR)/model_v8/final_model_v8
 MAX_LENGTH ?= 256
 ML_LOG     ?= $(CURDIR)/logs/ml-service.log
 ML_PID     ?= $(CURDIR)/.ml-service.pid
@@ -58,7 +58,7 @@ ml-start:
 	fi
 	@if [ ! -d $(MODEL_DIR) ]; then \
 	  echo "MODEL_DIR not found: $(MODEL_DIR)"; \
-	  echo "Override with: make run MODEL_DIR=/path/to/final_model_v3"; exit 1; \
+	  echo "Override with: make run MODEL_DIR=/path/to/final_model_v7"; exit 1; \
 	fi
 	@mkdir -p $(dir $(ML_LOG))
 	@echo "→ Starting ML service on $(ML_HOST):$(ML_PORT)  (logs: $(ML_LOG))"

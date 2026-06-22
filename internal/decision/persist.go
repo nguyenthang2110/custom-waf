@@ -1,7 +1,7 @@
 // internal/decision/persist.go
 //
 // Snapshot/Restore for the decision engine's lifetime counters
-// (TotalDecisions / Allow / Block / Challenge / Log / Whitelist hits /
+// (TotalDecisions / Allow / Block / Monitor / Whitelist hits /
 // Blacklist hits). Without persistence the dashboard "decisions since
 // boot" panels reset on every restart.
 package decision
@@ -17,8 +17,7 @@ type statsSnapshotV1 struct {
 	TotalDecisions int64     `json:"total_decisions"`
 	AllowCount     int64     `json:"allow_count"`
 	BlockCount     int64     `json:"block_count"`
-	ChallengeCount int64     `json:"challenge_count"`
-	LogCount       int64     `json:"log_count"`
+	MonitorCount   int64     `json:"monitor_count"`
 	WhitelistHits  int64     `json:"whitelist_hits"`
 	BlacklistHits  int64     `json:"blacklist_hits"`
 }
@@ -38,8 +37,7 @@ func (de *DecisionEngine) SnapshotStats() ([]byte, error) {
 		TotalDecisions: de.stats.TotalDecisions,
 		AllowCount:     de.stats.AllowCount,
 		BlockCount:     de.stats.BlockCount,
-		ChallengeCount: de.stats.ChallengeCount,
-		LogCount:       de.stats.LogCount,
+		MonitorCount:   de.stats.MonitorCount,
 		WhitelistHits:  de.stats.WhitelistHits,
 		BlacklistHits:  de.stats.BlacklistHits,
 	})
@@ -61,8 +59,7 @@ func (de *DecisionEngine) RestoreStats(data []byte) error {
 	de.stats.TotalDecisions = snap.TotalDecisions
 	de.stats.AllowCount = snap.AllowCount
 	de.stats.BlockCount = snap.BlockCount
-	de.stats.ChallengeCount = snap.ChallengeCount
-	de.stats.LogCount = snap.LogCount
+	de.stats.MonitorCount = snap.MonitorCount
 	de.stats.WhitelistHits = snap.WhitelistHits
 	de.stats.BlacklistHits = snap.BlacklistHits
 	de.stats.mu.Unlock()

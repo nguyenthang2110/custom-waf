@@ -8,7 +8,7 @@ Tài liệu này giải thích **các quyết định thiết kế** của schem
 
 WAF của đồ án đã có:
 - 36 rule schema v1 (`configs/rules/all_rules.json`)
-- ML service (DistilBERT, 5-class: normal/sqli/xss/cmdi/path_traversal)
+- ML service (DistilBERT v7, 10-class: normal/sqli/xss/cmdi/path_traversal/ssrf/xxe/log4shell/ssti/nosqli)
 - Behavior detector (in-memory, theo IP)
 - Decision engine (threshold-based)
 - Dashboard quản lý rule
@@ -32,13 +32,13 @@ Mục tiêu schema v2: **tận dụng những module đã có, fix bug v1, vẫn
 | Tính năng | Có trong format khác? | Đưa vào schema v2? |
 |---|---|---|
 | Phase 1-5 (request → response → logging) | CRS, Coraza | ❌ Đồ án chỉ inspect REQUEST. Response/logging chưa cần. |
-| Paranoia level | CRS | ❌ Quá tinh xảo cho 36 rule. Khi nào có 500+ rule mới cần. |
+| Paranoia level | CRS | ❌ Quá tinh xảo cho 78 rule. Khi nào có 500+ rule mới cần. |
 | Chain (CRS-style AND xuyên rule) | CRS | ❌ Đã có `detect.logic: "all"` cho AND trong cùng rule. Chain xuyên rule rối, dùng `labels` đủ. |
 | libinjection (`@detectSQLi`/`@detectXSS`) | CRS, Coraza | ❌ Cần cgo hoặc Go port. Đồ án dùng regex + ML đã đủ. |
 | Persistent state Redis | CRS | ❌ Behavior detector của đồ án đang in-memory, đủ với scale đồ án. |
 | JSONPath / XPath selector | Cloudflare | ❌ Đa số attack pattern không cần selector chính xác mức field. |
 | Skip-after markers | CRS | ❌ Phức tạp. Optimization hơn là feature. |
-| Multi-file ruleset | CRS, Coraza | ❌ 36 rule chưa cần tách file. Single file dễ quản lý. |
+| Multi-file ruleset | CRS, Coraza | ❌ 78 rule chưa cần tách file. Single file dễ quản lý. |
 | Sets manager (IP set, wordlist) | CRS | ⚠️ Đã có Blacklist/Whitelist riêng. Không nhân đôi. |
 | Boolean combinators (AND/OR/NOT) | AWS WAF | ✓ Đơn giản hoá: `detect.logic` + `pattern.negate` |
 | Labels (tag → consume) | AWS WAF | ✓ Đơn giản, mạnh, low overhead |

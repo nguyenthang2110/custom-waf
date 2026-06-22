@@ -295,7 +295,7 @@ func (d *Detector) checkVelocity(stats *ipStatistics, result *BehaviorResult) {
 		result.ThreatDetected = true
 		result.ThreatTypes = append(result.ThreatTypes, "HIGH_VELOCITY")
 		result.SuspicionScore += 0.3
-		result.RecommendAction = "CHALLENGE"
+		result.RecommendAction = "MONITOR"
 	}
 }
 

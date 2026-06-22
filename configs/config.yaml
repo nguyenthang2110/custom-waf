@@ -32,17 +32,16 @@ behavior:
   max_requests_per_second: 10
 
 decision:
+  # Two verdict tiers above ALLOW:
+  #   BLOCK   (reject, 403)              when score >= block_threshold (5.0)
+  #   MONITOR (forward but flag in log)  when score >  0 (matched >= 1 rule)
+  # Only a fully-clean request (score 0, no rule matched) is ALLOW. The ML
+  # gray-zone hook can clear a confidently-normal request back to 0 (-> ALLOW)
+  # before the decision. monitor_threshold defaults to 0 ("any positive score");
+  # raise it live via the dashboard / POST /waf-api/config to suppress noise.
   block_threshold: 5.0 # Block if score >= 5
-  challenge_threshold: 4.0 # Challenge if score >= 4
   enable_whitelist: true  # Enable IP whitelisting
   enable_blacklist: true  # Enable IP blacklisting
-  # Path prefixes silently bypassed (no inspection, no audit log).
-  # Built-in list already covers /socket.io/, /sockjs-node/, /ws/, /_ws/,
-  # /health, /metrics, /dashboard, /waf-api/, etc. — only add app-specific
-  # noise here. Editable live from the dashboard.
-  bypass_paths: []
-    # - "/api/heartbeat"
-    # - "/_internal/poll"
 
 database:
   host: "localhost"
@@ -79,8 +78,17 @@ tls:
   key_file: "./configs/certs/key.pem"
   auto_redirect: true  # Redirect HTTP to HTTPS
 
-audit:
-  log_path: "./logs/waf/audit.log" # Use relative path in current dir
+# Access log — every HTTP request that passes through the WAF, with its
+# verdict (ALLOW/MONITOR/BLOCK), matched rules and anomaly score. This is
+# a high-volume traffic record (one line per request).
+access_log:
+  log_path: "./logs/waf/access.log"
+
+# Audit log — admin & security events only (login, user CRUD, config
+# changes, rule uploads, log purges). Low-volume accountability trail of
+# "who did what, when". Kept separate from the access log on purpose.
+audit_log:
+  log_path: "./logs/waf/audit.log"
 
 # Training log: one JSONL line per inspected request, in the exact "text"
 # shape the ML service consumes. Files rotate daily — actual file names are
@@ -110,7 +118,7 @@ ml:
   timeout: 800ms
   max_body_len: 4096
 
-  # Gray-zone bounds. block_threshold=5.0, challenge_threshold=4.0.
+  # Gray-zone bounds. block_threshold=5.0, monitor_threshold=3.0.
   # Widened lower bound 4.0 -> 3.0 for the anomaly-scoring "indicator" rules
   # (IND-* in all_rules.json): each weak sign adds ~1.0 (low) / 2.0 (medium),
   # so a request showing ~3 weak signs lands at 3.0–4.9 and is sent to the
@@ -135,7 +143,7 @@ ml:
   breaker_cooldown: 30s
 
 # Outbound alerts. Disabled by default — toggle in the dashboard or here.
-# When enabled, BLOCK/CHALLENGE events with severity ≥ min_severity are
+# When enabled, BLOCK events with severity ≥ min_severity are
 # fanned out async to every *destination* whose `enabled` flag is true.
 # Each channel type holds a list of destinations — register many Slack
 # workspaces / email groups / webhook receivers in parallel.

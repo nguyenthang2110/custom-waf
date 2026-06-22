@@ -1,17 +1,17 @@
 # WAF ML Inference Service
 
 FastAPI service serving the DistilBERT classifier for the WAF.
-Called by the Go WAF when a request's rule score lands in the gray zone (4.0–4.99).
+Called by the Go WAF when a request's rule score lands in the gray zone [3.0, 5.0).
 
 ## Labels
-`normal`, `sqli`, `xss`, `cmdi`, `path_traversal`
+`normal`, `sqli`, `xss`, `cmdi`, `path_traversal`, `ssrf`, `xxe`, `log4shell`, `ssti`, `nosqli`
 
 ## Run locally (without Docker)
 
 ```bash
 cd ml-service
 pip install -r requirements.txt
-MODEL_DIR=../../../model_zip_v3/model/final_model_v3 \
+MODEL_DIR=../model_v7/final_model_v7 \
   uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
@@ -22,7 +22,7 @@ MODEL_DIR=../../../model_zip_v3/model/final_model_v3 \
 docker compose up ml -d
 ```
 
-The compose file mounts `model_zip_v3/model/final_model_v3` into `/app/model`.
+The compose file mounts `model_v7/final_model_v7` into `/app/model`.
 
 ## Endpoints
 

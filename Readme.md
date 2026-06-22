@@ -9,7 +9,7 @@ Hệ thống WAF hiệu năng cao được xây dựng từ đầu bằng ngôn 
 ## 🌟 Tính Năng Chính (Key Features)
 
 ### 🛡️ Core Protection Engine
-*   **Rule-based Detection**: Hệ thống luật (Ruleset) mạnh mẽ với 36 rules bao phủ 12 nhóm lỗ hổng:
+*   **Rule-based Detection**: Hệ thống luật (Ruleset) mạnh mẽ với 78 rules bao phủ 13 nhóm lỗ hổng (theo OWASP):
     *   SQL Injection (SQLi)
     *   Cross-Site Scripting (XSS)
     *   Remote Code Execution (RCE)
@@ -62,36 +62,74 @@ waf-project/
 
 ---
 
-## 🛠️ Hướng Dẫn Cài Đặt (Installation)
+## 🛠️ Hướng Dẫn Triển Khai (Deployment)
 
 ### Yêu cầu tiên quyết
-*   **Docker** & **Docker Compose**
-*   **Go** (phiên bản 1.21 trở lên)
-*   **Make** (tùy chọn)
+*   **Go** 1.21 trở lên
+*   **Docker** & **Docker Compose** (chạy PostgreSQL)
+*   **Python** 3.10+ (chạy ML service)
+*   **Make** (Linux/macOS, hoặc WSL2/Git Bash trên Windows)
+*   **Model DistilBERT v8** đặt tại `model_v8/final_model_v8/` (~268MB, không kèm trong repo)
 
-### Bước 1: Khởi tạo Database
-Chạy script để setup PostgreSQL trên Docker và tạo bảng dữ liệu:
+### Bước 1: Cấu hình
+Chỉnh `configs/config.yaml`:
+*   `upstream.url` — backend cần bảo vệ (mặc định `http://127.0.0.1:3000`)
+*   `auth.jwt_secret` — thay chuỗi mới cho môi trường ngoài localhost
+*   `database.*` — khớp với credential PostgreSQL
+*   `admin.allowed_cidrs` — thêm subnet nếu cần quản trị từ máy khác
+
+### Bước 2: Database
 ```bash
-chmod +x scripts/setup_db.sh
-./scripts/setup_db.sh
+make db-start
 ```
 
-### Bước 2: Tạo chứng chỉ SSL (cho HTTPS)
-Tạo chứng chỉ tự ký (Self-signed certificate) để chạy HTTPS trên localhost:
+### Bước 3: ML Service
 ```bash
-./scripts/generate_certs.sh
+make ml-install
+make ml-start MODEL_DIR=/abs/path/to/final_model_v8
 ```
 
-### Bước 3: Build và Chạy WAF
-Sử dụng Makefile để build và chạy ứng dụng:
+### Bước 4: Chứng chỉ SSL
+Repo đã kèm `configs/certs/cert.pem` & `key.pem`. Tạo lại khi cần:
 ```bash
-# Build ứng dụng
+mkdir -p configs/certs
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout configs/certs/key.pem -out configs/certs/cert.pem -subj "/CN=localhost"
+chmod 600 configs/certs/key.pem
+```
+
+### Bước 5: Build & Run
+```bash
 make build
-
-# Chạy ứng dụng
-make run
+make run MODEL_DIR=/abs/path/to/final_model_v8
 ```
-*WAF sẽ khởi động tại `https://localhost:8443` (Dashboard) và proxy traffic từ `http://localhost:8080`.*
+`make run` tự khởi động Postgres + ML rồi chạy WAF ở foreground. Các lệnh liên quan:
+```bash
+make run-waf      # chỉ WAF (ML đã chạy sẵn, hoặc tắt qua ml.enabled=false)
+make stop         # dừng ML (giữ Postgres)
+make down         # dừng cả ML và Postgres
+```
+
+### Cổng dịch vụ
+| Dịch vụ | Địa chỉ |
+|---|---|
+| Dashboard (HTTPS) | `https://localhost:8443` |
+| Proxy traffic (HTTP) | `http://localhost:8080` |
+| ML service | `http://127.0.0.1:8000` |
+| Backend upstream | `http://127.0.0.1:3000` |
+
+### Triển khai bằng Docker
+```bash
+make docker
+make docker-run
+```
+
+### Production (không dùng Docker)
+Linux dùng systemd (`deployments/systemd/`), Windows dùng Windows Service
+(`deployments/windows/install-services.ps1`). Chi tiết: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
+> **Windows:** `make` không chạy trên CMD/PowerShell thuần. Dùng **WSL2** (khuyến nghị)
+> hoặc Git Bash, hoặc chạy thủ công `go build` + `uvicorn` + `docker compose`.
 
 ---
 
@@ -107,8 +145,11 @@ python3 scripts/test_multi_ips.py
 
 ### 2. Test toàn diện (Comprehensive)
 ```bash
-# Script bash test đầy đủ các trường hợp
-./scripts/test_comprehensive.sh
+# Script bash chạy toàn bộ bộ test
+./scripts/test_all.sh
+
+# Hoặc test riêng các luật WAF
+./scripts/test_waf_rules.sh
 ```
 
 ### 3. Test năng lực chịu tải (Benchmark)
@@ -124,7 +165,7 @@ ab -n 1000 -c 100 https://localhost:8443/
 *   **Admin Dashboard**: `https://localhost:8443`
 *   **User mặc định**:
     *   Username: `admin`
-    *   Password: `admin123` (Vui lòng đổi mật khẩu sau khi đăng nhập)
+    *   Password: `admin` (Vui lòng đổi mật khẩu sau khi đăng nhập)
 
 ---
 
@@ -133,7 +174,7 @@ ab -n 1000 -c 100 https://localhost:8443/
 *   **v1.0**: Initial Release - WAF Core Engine, Basic Rules.
 *   **v1.1**: Added Dashboard & Rate Limiting.
 *   **v1.2**: Integrated PostgreSQL Authentication & JWT.
-*   **v1.3**: Expanded Ruleset (36 rules, 12 categories) & HTTPS Support.
+*   **v1.3**: Expanded Ruleset (78 rules, 13 categories) & HTTPS Support.
 
 ---
 

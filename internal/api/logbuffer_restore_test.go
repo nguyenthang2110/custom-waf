@@ -11,10 +11,10 @@ import (
 	"waf-project/internal/audit"
 )
 
-// TestRestoreLogBufferFromFile — writing N JSON lines and then calling
-// RestoreLogBufferFromFile must populate the in-memory ring with those
+// TestRestoreAccessBufferFromFile — writing N JSON lines and then calling
+// RestoreAccessBufferFromFile must populate the in-memory ring with those
 // entries (up to the cap) in arrival order.
-func TestRestoreLogBufferFromFile(t *testing.T) {
+func TestRestoreAccessBufferFromFile(t *testing.T) {
 	tmp := filepath.Join(t.TempDir(), "audit.log")
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -35,16 +35,16 @@ func TestRestoreLogBufferFromFile(t *testing.T) {
 	}
 	f.Close()
 
-	ClearLogBuffer()
-	n, err := RestoreLogBufferFromFile(tmp)
+	ClearAccessBuffer()
+	n, err := RestoreAccessBufferFromFile(tmp)
 	if err != nil {
-		t.Fatalf("RestoreLogBufferFromFile: %v", err)
+		t.Fatalf("RestoreAccessBufferFromFile: %v", err)
 	}
 	if n != logBufferCapacity {
 		t.Errorf("restored %d entries, want %d (cap)", n, logBufferCapacity)
 	}
 
-	got := GetLogBuffer()
+	got := GetAccessBuffer()
 	if len(got) != logBufferCapacity {
 		t.Fatalf("buffer length: %d want %d", len(got), logBufferCapacity)
 	}
@@ -60,9 +60,9 @@ func TestRestoreLogBufferFromFile(t *testing.T) {
 	}
 }
 
-func TestRestoreLogBufferFromFile_Missing(t *testing.T) {
-	ClearLogBuffer()
-	n, err := RestoreLogBufferFromFile("/nonexistent/path")
+func TestRestoreAccessBufferFromFile_Missing(t *testing.T) {
+	ClearAccessBuffer()
+	n, err := RestoreAccessBufferFromFile("/nonexistent/path")
 	if err != nil {
 		t.Fatalf("missing file should not error: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestRestoreLogBufferFromFile_Missing(t *testing.T) {
 	}
 }
 
-func TestRestoreLogBufferFromFile_SkipsBadLines(t *testing.T) {
+func TestRestoreAccessBufferFromFile_SkipsBadLines(t *testing.T) {
 	tmp := filepath.Join(t.TempDir(), "audit.log")
 	f, _ := os.Create(tmp)
 	// One good line, one corrupt, one good
@@ -86,15 +86,15 @@ func TestRestoreLogBufferFromFile_SkipsBadLines(t *testing.T) {
 	f.Write([]byte("\n"))
 	f.Close()
 
-	ClearLogBuffer()
-	n, err := RestoreLogBufferFromFile(tmp)
+	ClearAccessBuffer()
+	n, err := RestoreAccessBufferFromFile(tmp)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if n != 2 {
 		t.Errorf("got %d want 2 (skipping corrupt line)", n)
 	}
-	got := GetLogBuffer()
+	got := GetAccessBuffer()
 	if got[0].RequestID != "ok-1" || got[1].RequestID != "ok-2" {
 		t.Errorf("entries wrong: %v", got)
 	}

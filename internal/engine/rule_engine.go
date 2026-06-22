@@ -3,12 +3,12 @@
 // V2 rule engine — evaluates parsed HTTP requests against the ruleset.
 //
 // Evaluation pipeline per rule:
-//   1. when         — pre-filter (methods, paths, score gate, labels)
-//   2. except       — whitelist (IPs, paths, UAs, labels)
-//   3. inspect      — extract input values from request
-//   4. transforms   — chain (per rule)
-//   5. detect       — boolean tree (any/all) of pattern leaves
-//   6. action       — score, labels, log, block, ML confirm, track
+//  1. when         — pre-filter (methods, paths, score gate, labels)
+//  2. except       — whitelist (IPs, paths, UAs, labels)
+//  3. inspect      — extract input values from request
+//  4. transforms   — chain (per rule)
+//  5. detect       — boolean tree (any/all) of pattern leaves
+//  6. action       — score, labels, log, block, ML confirm, track
 //
 // Public API surface is preserved from v1 so existing callers
 // (middleware/audit/decision) keep working without changes.
@@ -33,11 +33,10 @@ type RuleEngine struct {
 	rules     []*Rule
 	ruleCache map[string]*Rule
 
-	// Thresholds for backwards-compat string Decision (BLOCK/CHALLENGE/LOG/ALLOW).
+	// Thresholds for backwards-compat string Decision (BLOCK/MONITOR/ALLOW).
 	// Real block decision is made by internal/decision; engine only computes a hint.
-	blockThreshold     float64
-	challengeThreshold float64
-	logThreshold       float64
+	blockThreshold   float64
+	monitorThreshold float64
 
 	transformFuncs map[string]TransformFunc
 
@@ -50,13 +49,12 @@ type RuleEngine struct {
 // NewRuleEngine — preserves v1 constructor signature.
 func NewRuleEngine() *RuleEngine {
 	return &RuleEngine{
-		rules:              make([]*Rule, 0),
-		ruleCache:          make(map[string]*Rule),
-		blockThreshold:     10.0,
-		challengeThreshold: 5.0,
-		logThreshold:       3.0,
-		transformFuncs:     builtinTransforms,
-		tracker:            NewTracker(),
+		rules:            make([]*Rule, 0),
+		ruleCache:        make(map[string]*Rule),
+		blockThreshold:   10.0,
+		monitorThreshold: 0.0, // 0 = monitor any request that scored > 0
+		transformFuncs:   builtinTransforms,
+		tracker:          NewTracker(),
 		metrics: &RuleMetrics{
 			RuleHitCount:  make(map[string]int64),
 			CategoryStats: make(map[string]int64),
@@ -72,11 +70,10 @@ func (re *RuleEngine) SetMLPredictor(p MLPredictor) {
 }
 
 // SetThresholds — for decision hint computation.
-func (re *RuleEngine) SetThresholds(block, challenge, logT float64) {
+func (re *RuleEngine) SetThresholds(block, monitor float64) {
 	re.mu.Lock()
 	re.blockThreshold = block
-	re.challengeThreshold = challenge
-	re.logThreshold = logT
+	re.monitorThreshold = monitor
 	re.mu.Unlock()
 }
 
@@ -564,11 +561,10 @@ func (re *RuleEngine) determineDecision(score float64) string {
 	if score >= re.blockThreshold {
 		return "BLOCK"
 	}
-	if score >= re.challengeThreshold {
-		return "CHALLENGE"
-	}
-	if score >= re.logThreshold {
-		return "LOG"
+	// Any request that matched at least one rule (score > 0) is MONITOR.
+	// monitorThreshold (default 0) lets an operator raise the floor.
+	if score > 0 && score >= re.monitorThreshold {
+		return "MONITOR"
 	}
 	return "ALLOW"
 }

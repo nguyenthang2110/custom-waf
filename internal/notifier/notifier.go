@@ -73,7 +73,7 @@ const (
 type Event struct {
 	Kind      EventKind `json:"kind,omitempty"` // "request" (default) or "system"
 	Timestamp time.Time `json:"timestamp"`
-	Decision  string    `json:"decision"`   // BLOCK / CHALLENGE / LOG / SYSTEM
+	Decision  string    `json:"decision"`   // BLOCK / MONITOR / SYSTEM
 	Severity  string    `json:"severity"`   // INFO/LOW/MEDIUM/HIGH/CRITICAL
 	ClientIP  string    `json:"client_ip"`
 	Method    string    `json:"method"`
@@ -100,7 +100,7 @@ type Config struct {
 	Timeout         time.Duration `json:"-"                 yaml:"timeout"`          // per channel send; default 5s
 
 	// Per-kind toggles. Defaults: request events on, system events off —
-	// preserves the existing behavior (block/challenge → alert) while
+	// preserves the existing behavior (block → alert) while
 	// keeping operators from getting paged about their own dashboard
 	// clicks unless they explicitly opt in.
 	SendRequestEvents bool `json:"send_request_events" yaml:"send_request_events"`

@@ -216,11 +216,9 @@ func main() {
 	log.Println("✓ Behavior Detector initialized")
 
 	decisionEngine := decision.NewDecisionEngine(decision.DecisionConfig{
-		BlockThreshold:     cfg.Decision.BlockThreshold,
-		ChallengeThreshold: cfg.Decision.ChallengeThreshold,
-		EnableWhitelist:    cfg.Decision.EnableWhitelist,
-		EnableBlacklist:    cfg.Decision.EnableBlacklist,
-		BypassPathPrefixes: cfg.Decision.BypassPaths,
+		BlockThreshold:  cfg.Decision.BlockThreshold,
+		EnableWhitelist: cfg.Decision.EnableWhitelist,
+		EnableBlacklist: cfg.Decision.EnableBlacklist,
 	})
 	log.Println("✓ Decision Engine initialized")
 
@@ -238,12 +236,22 @@ func main() {
 		}
 	}()
 
-	auditLogger := audit.NewLogger(audit.AuditConfig{
-		LogPath:    cfg.Audit.LogPath,
+	// Two independent log streams:
+	//   accessLogger — every HTTP request + WAF verdict (high-volume traffic).
+	//   auditLogger  — admin / security events only (accountability trail).
+	accessLogger := audit.NewLogger(audit.AuditConfig{
+		LogPath:    cfg.AccessLog.LogPath,
 		AsyncWrite: true,
 		BufferSize: 1000,
 	})
-	log.Println("✓ Audit Logger initialized")
+	log.Printf("✓ Access Logger initialized → %s", cfg.AccessLog.LogPath)
+
+	auditLogger := audit.NewLogger(audit.AuditConfig{
+		LogPath:    cfg.AuditLog.LogPath,
+		AsyncWrite: true,
+		BufferSize: 1000,
+	})
+	log.Printf("✓ Audit Logger initialized → %s", cfg.AuditLog.LogPath)
 
 	trainingLogger := training.NewLogger(training.Config{
 		Enabled:          cfg.Training.Enabled,
@@ -302,7 +310,7 @@ func main() {
 		},
 		mlClient.Enabled,
 	))
-	ruleEngine.SetThresholds(cfg.Decision.BlockThreshold, cfg.Decision.ChallengeThreshold, 3.0)
+	ruleEngine.SetThresholds(cfg.Decision.BlockThreshold, 0.0) // monitor floor 0 = flag any score > 0
 
 	// Connect to database
 	db, err := database.Connect(cfg.Database)
@@ -435,7 +443,7 @@ func main() {
 	// synchronously on the goroutine that triggered the event, but both
 	// targets are non-blocking (in-memory append + bounded send queue).
 	auditLogger.SetSystemSink(func(e *audit.AuditEntry) {
-		api.AddToLogBuffer(e)
+		api.AddToAuditBuffer(e)
 		eventType, _ := e.Metadata["event_type"].(string)
 		severity := classifySystemEventSeverity(eventType)
 		// LogSecurityEvent injects an explicit severity in Metadata —
@@ -463,6 +471,7 @@ func main() {
 		RateLimiter:         rateLimiter,
 		BehaviorDetector:    behaviorDetector,
 		DecisionEngine:      decisionEngine,
+		AccessLogger:        accessLogger,
 		AuditLogger:         auditLogger,
 		TrainingLogger:      trainingLogger,
 		Notifier:            alertNotifier,
@@ -545,10 +554,15 @@ func main() {
 		log.Printf("⚠️  Config persistence disabled (DB unavailable: %v)", err)
 	}
 
-	// Rebuild the dashboard's "recent events" ring buffer from the
-	// audit log file on disk so it isn't empty for the first minute
-	// after every restart.
-	if n, err := api.RestoreLogBufferFromFile(cfg.Audit.LogPath); err != nil {
+	// Rebuild the dashboard's ring buffers from the log files on disk so
+	// they aren't empty for the first minute after every restart. The
+	// access log and audit log are restored independently.
+	if n, err := api.RestoreAccessBufferFromFile(cfg.AccessLog.LogPath); err != nil {
+		log.Printf("⚠️  Failed to restore access ring buffer: %v", err)
+	} else if n > 0 {
+		log.Printf("✓ Restored %d access entries into dashboard ring buffer", n)
+	}
+	if n, err := api.RestoreAuditBufferFromFile(cfg.AuditLog.LogPath); err != nil {
 		log.Printf("⚠️  Failed to restore audit ring buffer: %v", err)
 	} else if n > 0 {
 		log.Printf("✓ Restored %d audit entries into dashboard ring buffer", n)
@@ -568,14 +582,13 @@ func main() {
 		log.Println("⚠️  Admin access control: DISABLED (admin endpoints exposed to anyone)")
 	}
 
-	// Authentication pages (serve directly, don't proxy)
+	// Authentication pages (serve directly, don't proxy).
+	// Only /login.html exists — there is no public registration page;
+	// accounts are created by an admin from the dashboard.
 	mux.HandleFunc("/login.html", adminAC.WrapFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, web.FS, "login.html")
 	}))
-	mux.HandleFunc("/register.html", adminAC.WrapFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, web.FS, "register.html")
-	}))
-	log.Println("✓ Authentication pages: /login.html, /register.html")
+	log.Println("✓ Authentication page: /login.html")
 
 	// Dashboard (serve embedded files) — gated by adminAC (network) THEN
 	// PageGuard (auth). Outsider → 404. Logged-out local → 302 /login.html.
@@ -759,7 +772,8 @@ func main() {
 	}
 
 	// Cleanup resources
-	log.Println("Closing audit logger...")
+	log.Println("Closing access + audit loggers...")
+	accessLogger.Close()
 	auditLogger.Close()
 	if trainingLogger.Enabled() {
 		log.Println("Closing training logger...")

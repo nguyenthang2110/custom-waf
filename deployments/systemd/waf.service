@@ -1,0 +1,37 @@
+[Unit]
+Description=WAF Reverse Proxy (Go rule engine + ML gray-zone)
+Documentation=file:///opt/waf/docs/DEPLOYMENT.md
+After=network-online.target postgresql.service waf-ml.service
+Wants=network-online.target
+# If Postgres runs in Docker on this host instead of native, drop
+# postgresql.service above and add: After=docker.service
+Requires=waf-ml.service
+
+[Service]
+Type=simple
+User=waf
+Group=waf
+# WorkingDirectory must be the install root: the binary resolves
+# configs/, configs/rules/, and ./logs/ relative to it. The web dashboard
+# is embedded in the binary, so no asset path is needed.
+WorkingDirectory=/opt/waf
+ExecStart=/opt/waf/bin/waf -config /opt/waf/configs/config.yaml -rules /opt/waf/configs/rules/all_rules.json
+
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+
+# Allow binding to :80/:443 without running as root (for a public deploy
+# where you set server.listen to :80 / :443 in config.yaml).
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/waf/logs
+
+[Install]
+WantedBy=multi-user.target

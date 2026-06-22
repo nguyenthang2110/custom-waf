@@ -3,11 +3,6 @@ package middleware
 
 import (
 	"context"
-	"crypto/hmac"
-	cryptorand "crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +10,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +36,10 @@ type WAFConfig struct {
 	RateLimiter      *ratelimit.RateLimiter
 	BehaviorDetector *behavior.Detector
 	DecisionEngine   *decision.DecisionEngine
+	// AccessLogger records every HTTP request + WAF verdict (the access log).
+	AccessLogger *audit.Logger
+	// AuditLogger records admin / security events only (the audit log):
+	// rate-limit trips, proxy errors, etc. fire here, NOT per-request rows.
 	AuditLogger      *audit.Logger
 	TrainingLogger   *training.Logger // optional — nil disables training capture
 	Notifier         *notifier.Notifier // optional — nil disables alert fanout
@@ -69,16 +67,7 @@ type WAFMiddleware struct {
 	proxy      *httputil.ReverseProxy
 	backendURL string
 	mu         sync.RWMutex // Protects proxy and backendURL
-
-	// challengeSecret signs the challenge-pass cookie issued by /__waf/challenge.
-	// Generated at startup; lost on restart (forces re-challenge, intentional).
-	challengeSecret []byte
 }
-
-// Cookie name used to bypass the challenge once the PoW has been solved.
-// Format: <expiry_unix>.<hex_hmac(ip|ua|expiry)>. Server validates HMAC + TTL.
-const challengeCookieName = "waf_challenge_pass"
-const challengeCookieTTL = 30 * time.Minute
 
 // responseWriter wraps http.ResponseWriter to capture response details
 type responseWriter struct {
@@ -106,17 +95,16 @@ func NewWAF(config *WAFConfig) *WAFMiddleware {
 		panic(fmt.Sprintf("Invalid upstream URL: %v", err))
 	}
 
-	secret := make([]byte, 32)
-	if _, err := cryptorand.Read(secret); err != nil {
-		// extremely unlikely; fall back to a deterministic-but-uniqueish value
-		copy(secret, []byte(time.Now().Format(time.RFC3339Nano)))
+	// Back-compat / safety: callers (and tests) that only wire AuditLogger
+	// still get request logging — the access path falls back to it.
+	if config.AccessLogger == nil {
+		config.AccessLogger = config.AuditLogger
 	}
 
 	waf := &WAFMiddleware{
-		config:          config,
-		proxy:           httputil.NewSingleHostReverseProxy(upstreamURL),
-		backendURL:      config.Upstream,
-		challengeSecret: secret,
+		config:     config,
+		proxy:      httputil.NewSingleHostReverseProxy(upstreamURL),
+		backendURL: config.Upstream,
 	}
 
 	// Customize proxy error handler
@@ -125,113 +113,9 @@ func NewWAF(config *WAFConfig) *WAFMiddleware {
 	return waf
 }
 
-// =============================================================================
-// Challenge cookie + verification
-// =============================================================================
-
-// hasValidChallengeCookie returns true if the request carries a still-valid
-// challenge pass issued by /__waf/challenge for the same IP+UA combination.
-func (w *WAFMiddleware) hasValidChallengeCookie(r *http.Request, clientIP, ua string) bool {
-	c, err := r.Cookie(challengeCookieName)
-	if err != nil || c.Value == "" {
-		return false
-	}
-	parts := strings.SplitN(c.Value, ".", 2)
-	if len(parts) != 2 {
-		return false
-	}
-	expiry, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil || time.Now().Unix() > expiry {
-		return false
-	}
-	mac := hmac.New(sha256.New, w.challengeSecret)
-	fmt.Fprintf(mac, "%s|%s|%d", clientIP, ua, expiry)
-	want := hex.EncodeToString(mac.Sum(nil))
-	return hmac.Equal([]byte(parts[1]), []byte(want))
-}
-
-// issueChallengeCookie returns a Set-Cookie header value granting bypass.
-func (w *WAFMiddleware) issueChallengeCookie(clientIP, ua string, secure bool) *http.Cookie {
-	expiry := time.Now().Add(challengeCookieTTL).Unix()
-	mac := hmac.New(sha256.New, w.challengeSecret)
-	fmt.Fprintf(mac, "%s|%s|%d", clientIP, ua, expiry)
-	val := fmt.Sprintf("%d.%s", expiry, hex.EncodeToString(mac.Sum(nil)))
-	return &http.Cookie{
-		Name:     challengeCookieName,
-		Value:    val,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: http.SameSiteLaxMode,
-		Expires:  time.Unix(expiry, 0),
-	}
-}
-
-// handleChallengeVerify is the POST endpoint the challenge page submits to.
-// It validates the PoW (sha256(challenge + ":" + nonce) has N leading zero
-// bits) and on success issues the bypass cookie.
-func (w *WAFMiddleware) handleChallengeVerify(rw http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(rw, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var body struct {
-		Challenge  string `json:"challenge"`
-		Nonce      int    `json:"nonce"`
-		Difficulty int    `json:"difficulty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(rw, "bad request", http.StatusBadRequest)
-		return
-	}
-	if body.Challenge == "" || body.Difficulty < 8 || body.Difficulty > 24 {
-		http.Error(rw, "bad challenge", http.StatusBadRequest)
-		return
-	}
-	sum := sha256.Sum256([]byte(body.Challenge + ":" + strconv.Itoa(body.Nonce)))
-	if !hasLeadingZeroBits(sum[:], body.Difficulty) {
-		http.Error(rw, "invalid proof of work", http.StatusBadRequest)
-		return
-	}
-	clientIP, _, _ := strings.Cut(r.RemoteAddr, ":")
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		clientIP, _, _ = strings.Cut(xff, ",")
-		clientIP = strings.TrimSpace(clientIP)
-	}
-	http.SetCookie(rw, w.issueChallengeCookie(clientIP, r.UserAgent(), r.TLS != nil))
-	rw.Header().Set("Content-Type", "application/json")
-	rw.WriteHeader(http.StatusOK)
-	_, _ = rw.Write([]byte(`{"ok":true}`))
-}
-
-func hasLeadingZeroBits(b []byte, bits int) bool {
-	full := bits / 8
-	rem := bits % 8
-	for i := 0; i < full; i++ {
-		if b[i] != 0 {
-			return false
-		}
-	}
-	if rem == 0 {
-		return true
-	}
-	if full >= len(b) {
-		return false
-	}
-	return b[full]>>(8-uint(rem)) == 0
-}
-
 // ServeHTTP implements http.Handler interface
 func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
-
-	// Challenge verification endpoint — handle BEFORE security headers /
-	// parsing so the WAF doesn't inspect the legitimate POST from its own
-	// challenge page.
-	if r.URL.Path == "/__waf/challenge" {
-		w.handleChallengeVerify(rw, r)
-		return
-	}
 
 	// Add security headers
 	rw.Header().Set("X-Content-Type-Options", "nosniff")
@@ -357,8 +241,10 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			},
 		)
 
-		// Add to API buffer for dashboard
-		api.AddToLogBuffer(entry)
+		// Add to access-log buffer for dashboard (this rate-limited
+		// request is itself an access-log row; the RATE_LIMIT security
+		// event above is the corresponding audit-log row).
+		api.AddToAccessBuffer(entry)
 
 		w.blockRequest(wrappedRW, parsed, "RATE_LIMIT", startTime, 429)
 		return
@@ -440,8 +326,6 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		if responseStatus == 0 {
 			responseStatus = 403 // Default for BLOCK
 		}
-	case "CHALLENGE":
-		responseStatus = 429 // Challenge usually uses 429
 	default:
 		responseStatus = wrappedRW.statusCode
 		if responseStatus == 0 {
@@ -452,17 +336,16 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	// ========================================================================
 	// STEP 7: Log Audit Entry
 	// ========================================================================
-	w.logAuditEntry(parsed, evalResult, decisionResult, behaviorResult,
+	w.logAccessEntry(parsed, evalResult, decisionResult, behaviorResult,
 		responseStatus, totalLatency, mlVerdict)
 
 	// ========================================================================
 	// STEP 7b: Outbound Alert (Slack/email/webhook)
-	// Fire-and-forget — never blocks the hot path. Fired for BLOCK/CHALLENGE
-	// only; the notifier itself filters by severity + throttles dupes.
+	// Fire-and-forget — never blocks the hot path. Fired for BLOCK only;
+	// the notifier itself filters by severity + throttles dupes.
 	// ========================================================================
 	if w.config.Notifier != nil && !w.config.DryRun {
-		switch decisionResult.Decision {
-		case "BLOCK", "CHALLENGE":
+		if decisionResult.Decision == "BLOCK" {
 			w.dispatchAlert(parsed, evalResult, decisionResult, r)
 		}
 	}
@@ -497,19 +380,7 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		w.blockRequest(wrappedRW, parsed, decisionResult.Reason, startTime,
 			decisionResult.ResponseCode)
 
-	case "CHALLENGE":
-		// If the client previously solved the PoW, treat the request as
-		// allowed for the cookie's TTL. Otherwise serve the interstitial.
-		if w.hasValidChallengeCookie(r, parsed.ClientIP, parsed.UserAgent) {
-			w.mu.RLock()
-			proxy := w.proxy
-			w.mu.RUnlock()
-			proxy.ServeHTTP(wrappedRW, r)
-		} else {
-			w.challengeRequest(wrappedRW, parsed, decisionResult.ChallengeType)
-		}
-
-	case "ALLOW", "LOG":
+	case "ALLOW", "MONITOR":
 		// Add debug headers if enabled
 		if w.config.EnableDebugHeaders {
 			w.addDebugHeaders(wrappedRW, decisionResult, evalResult)
@@ -619,23 +490,6 @@ func (w *WAFMiddleware) dispatchAlert(
 		UserAgent: parsed.UserAgent,
 		RequestID: parsed.RequestID,
 	})
-}
-
-// challengeRequest presents a challenge to the user
-func (w *WAFMiddleware) challengeRequest(
-	rw *responseWriter,
-	parsed *engine.ParsedRequest,
-	challengeType string,
-) {
-	rw.Header().Set("X-WAF-Status", "CHALLENGE")
-	rw.Header().Set("X-WAF-Request-ID", parsed.RequestID)
-	rw.Header().Set("X-WAF-Challenge-Type", challengeType)
-	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-	rw.WriteHeader(http.StatusTooManyRequests)
-
-	challengePage := w.getChallengePage(parsed.RequestID, challengeType)
-	io.WriteString(rw, challengePage)
 }
 
 // handleError handles errors during request processing
@@ -761,160 +615,12 @@ ul li{margin:4px 0}
 </body>
 </html>`
 
-// getChallengePage returns a Cloudflare-style interstitial that runs a
-// proof-of-work in the browser, then submits the result to /__waf/challenge.
-// On success the server sets a short-lived cookie and the page reloads.
-//
-// PoW: find a nonce N such that SHA-256(challenge + N) starts with K zeros.
-// K is controlled by `Difficulty` (default 16 bits → ~2 seconds on modern CPU).
-func (w *WAFMiddleware) getChallengePage(requestID, challengeType string) string {
-	// 16-byte challenge encoded as hex; same encoding the JS expects.
-	challenge := newChallengeNonce()
-	difficulty := 16 // bits — ~65k average tries
-	return fmt.Sprintf(challengePageTpl, htmlEscape(requestID), challenge, difficulty, htmlEscape(challengeType))
-}
-
-const challengePageTpl = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Checking your browser…</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-:root{--bg:#f6f7f9;--card:#fff;--line:#e6e8eb;--fg:#1f2937;--fg-2:#4b5563;--fg-3:#6b7280;--fg-4:#9ca3af;--accent:#0891b2;--ok:#16a34a;--code-bg:#f3f4f6}
-@media (prefers-color-scheme: dark){
-  :root{--bg:#0f1115;--card:#161b22;--line:#262c36;--fg:#e6edf3;--fg-2:#9ba6b6;--fg-3:#6e7681;--fg-4:#484f58;--accent:#22d3ee;--ok:#34d399;--code-bg:#1c2128}
-}
-html,body{height:100%%}
-body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--fg);line-height:1.55}
-.wrap{max-width:560px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center}
-.brand{display:flex;align-items:center;gap:10px;color:var(--fg-3);font-size:13px;margin-bottom:18px}
-.brand .dot{width:8px;height:8px;border-radius:50%%;background:var(--accent);animation:pulse 1.4s ease-in-out infinite}
-@keyframes pulse{0%%,100%%{opacity:1;transform:scale(1)}50%%{opacity:.5;transform:scale(.85)}}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:34px 32px;width:100%%;box-shadow:0 1px 0 rgba(255,255,255,.04) inset,0 10px 40px -20px rgba(0,0,0,.18)}
-.spin{width:42px;height:42px;border-radius:50%%;border:3px solid var(--line);border-top-color:var(--accent);margin:0 auto 18px;animation:spin .9s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.ok-icon{width:42px;height:42px;border-radius:50%%;border:3px solid var(--ok);margin:0 auto 18px;display:none;align-items:center;justify-content:center;color:var(--ok);font-size:22px;font-weight:700}
-.h1{font-size:20px;font-weight:600;margin-bottom:8px;letter-spacing:-.01em}
-.lead{color:var(--fg-2);font-size:14px;margin-bottom:18px}
-.progress{height:5px;background:var(--code-bg);border-radius:999px;overflow:hidden;margin:18px 0 8px}
-.progress > div{height:100%%;width:0%%;background:linear-gradient(90deg,var(--accent),#818cf8);transition:width .15s linear}
-.detail{color:var(--fg-3);font-size:11px;font-family:'JetBrains Mono',ui-monospace,monospace;margin-top:8px;letter-spacing:.02em}
-.foot{margin-top:22px;color:var(--fg-4);font-size:11px;line-height:1.7}
-.foot b{color:var(--fg-3);font-weight:600}
-.err{display:none;color:#dc2626;font-size:13px;margin-top:12px}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="brand"><span class="dot"></span><span>Web Application Firewall</span></div>
-  <div class="card">
-    <div id="spin" class="spin"></div>
-    <div id="ok" class="ok-icon">✓</div>
-    <h1 id="h1" class="h1">Checking your browser…</h1>
-    <p id="lead" class="lead">This site needs to verify you're a real visitor. It will take just a few seconds.</p>
-    <div class="progress"><div id="bar"></div></div>
-    <div id="detail" class="detail">Initialising…</div>
-    <div id="err" class="err">Something went wrong. <a href="javascript:location.reload()" style="color:inherit">Reload</a>.</div>
-  </div>
-  <div class="foot"><b>Ray ID</b> · <span style="font-family:'JetBrains Mono',monospace">%[1]s</span><br>Powered by NHT WAF · challenge type: %[4]s</div>
-</div>
-
-<script>
-(async () => {
-  const challenge  = "%[2]s";
-  const difficulty = %[3]d;    // leading zero bits required in sha256
-
-  const bar = document.getElementById('bar');
-  const det = document.getElementById('detail');
-  const err = document.getElementById('err');
-  const spin = document.getElementById('spin');
-  const ok = document.getElementById('ok');
-  const h1 = document.getElementById('h1');
-  const lead = document.getElementById('lead');
-
-  // SHA-256 helper using SubtleCrypto (available on HTTPS or localhost)
-  const enc = new TextEncoder();
-  async function sha256Hex(s) {
-    const buf = await crypto.subtle.digest('SHA-256', enc.encode(s));
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
-  }
-  function meetsDifficulty(hex, bits) {
-    const fullBytes = bits >> 3;
-    const remBits   = bits & 7;
-    for (let i = 0; i < fullBytes; i++) if (hex.substr(i*2, 2) !== '00') return false;
-    if (remBits === 0) return true;
-    const next = parseInt(hex.substr(fullBytes*2, 2), 16);
-    return (next >> (8 - remBits)) === 0;
-  }
-
-  const startedAt = performance.now();
-  let nonce = 0;
-  const expectedTries = 1 << difficulty;
-  try {
-    while (true) {
-      // Batch 800 iterations between yields to keep the UI responsive.
-      const batchEnd = nonce + 800;
-      for (; nonce < batchEnd; nonce++) {
-        const hex = await sha256Hex(challenge + ":" + nonce);
-        if (meetsDifficulty(hex, difficulty)) {
-          const elapsed = ((performance.now() - startedAt) / 1000).toFixed(2);
-          bar.style.width = '100%%';
-          det.textContent = "Solved in " + elapsed + "s · nonce=" + nonce;
-
-          // Submit to server for verification + cookie.
-          const resp = await fetch('/__waf/challenge', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ challenge, nonce, difficulty })
-          });
-          if (!resp.ok) throw new Error('verify ' + resp.status);
-
-          spin.style.display = 'none';
-          ok.style.display = 'flex';
-          h1.textContent = 'Verified';
-          lead.textContent = 'Redirecting you back…';
-          await new Promise(r => setTimeout(r, 400));
-          location.reload();
-          return;
-        }
-      }
-      // Progress update — bound estimate by 2x expectedTries so the bar doesn't hit 100%% early.
-      const pct = Math.min(95, (nonce / expectedTries) * 50);
-      bar.style.width = pct + '%%';
-      if (nonce %% 4000 === 0) det.textContent = "Working… " + nonce.toLocaleString() + " tries";
-      // Cooperative yield.
-      await new Promise(r => setTimeout(r, 0));
-    }
-  } catch (e) {
-    console.error(e);
-    err.style.display = 'block';
-  }
-})();
-</script>
-</body>
-</html>`
-
-// htmlEscape — minimal escape for substitutions into the templates.
+// htmlEscape escapes the small set of characters that matter when
+// interpolating untrusted request fields into the block page HTML.
 func htmlEscape(s string) string {
 	return strings.NewReplacer(
 		"&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;",
 	).Replace(s)
-}
-
-// newChallengeNonce returns a 32-char hex challenge string. Uses
-// crypto/rand — falls back to time-based if rand fails (degraded but safe
-// because the server-side HMAC still binds the nonce to the client IP).
-func newChallengeNonce() string {
-	var b [16]byte
-	if _, err := cryptorand.Read(b[:]); err != nil {
-		t := time.Now().UnixNano()
-		for i := 0; i < 16; i++ {
-			b[i] = byte(t >> (uint(i) * 4))
-		}
-	}
-	return hex.EncodeToString(b[:])
 }
 
 // ============================================================================
@@ -962,6 +668,11 @@ func NewWAFWithLogBuffer(config *WAFConfig) *WAFMiddleware {
 		panic(fmt.Sprintf("Invalid upstream URL: %v", err))
 	}
 
+	// Access path falls back to the audit logger when not separately wired.
+	if config.AccessLogger == nil {
+		config.AccessLogger = config.AuditLogger
+	}
+
 	waf := &WAFMiddleware{
 		config:     config,
 		proxy:      httputil.NewSingleHostReverseProxy(upstreamURL),
@@ -1007,8 +718,36 @@ func (w *WAFMiddleware) UpdateBackend(newURL string) error {
 	return nil
 }
 
-// logAuditEntry records audit details and stores them for the API dashboard
-func (w *WAFMiddleware) logAuditEntry(
+// GetMLSettings returns the live ML scoring knobs. The enabled flag is read
+// from the ML client (atomic); the float knobs are guarded by w.mu since the
+// hot-path inference snapshot and dashboard edits race. The gray-zone band
+// itself is not live-editable — it stays fixed at the config.yaml value.
+func (w *WAFMiddleware) GetMLSettings() (enabled bool, attackBump, normalPenalty, confidence float64) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	enabled = w.config.MLClient != nil && w.config.MLClient.Enabled()
+	return enabled,
+		w.config.MLAttackBump, w.config.MLNormalPenalty,
+		w.config.MLConfidenceMinimum
+}
+
+// SetMLSettings applies new ML scoring knobs live. enabled toggles the ML
+// client (no-op if no client is wired). Validation is the caller's job.
+func (w *WAFMiddleware) SetMLSettings(enabled bool, attackBump, normalPenalty, confidence float64) {
+	w.mu.Lock()
+	w.config.MLAttackBump = attackBump
+	w.config.MLNormalPenalty = normalPenalty
+	w.config.MLConfidenceMinimum = confidence
+	client := w.config.MLClient
+	w.mu.Unlock()
+	if client != nil {
+		client.SetEnabled(enabled)
+	}
+}
+
+// logAccessEntry records the per-request access-log row (request metadata +
+// WAF verdict) and stores it for the API dashboard.
+func (w *WAFMiddleware) logAccessEntry(
 	parsed *engine.ParsedRequest,
 	evalResult *engine.EvaluationResult,
 	decisionResult *decision.DecisionResult,
@@ -1085,11 +824,11 @@ func (w *WAFMiddleware) logAuditEntry(
 		}
 	}
 
-	// Log to file
-	w.config.AuditLogger.Log(entry)
+	// Log to the access-log file
+	w.config.AccessLogger.Log(entry)
 
-	// Add to API buffer for dashboard
-	api.AddToLogBuffer(entry)
+	// Add to access-log buffer for dashboard
+	api.AddToAccessBuffer(entry)
 
 	// Mirror to the training file. Skip noisy paths (static assets, infra,
 	// websocket polling, plus user-supplied prefixes) so the dataset stays
@@ -1134,8 +873,8 @@ func (w *WAFMiddleware) logWhitelistEntry(
 			"whitelisted": true,
 		},
 	}
-	w.config.AuditLogger.Log(entry)
-	api.AddToLogBuffer(entry)
+	w.config.AccessLogger.Log(entry)
+	api.AddToAccessBuffer(entry)
 }
 
 // captureHeadersForAudit copies the request headers verbatim. No redaction
@@ -1181,8 +920,16 @@ func (w *WAFMiddleware) runMLInference(
 		return mlVerdictRecord{}
 	}
 
-	score := evalResult.TotalScore
+	// Snapshot the live-editable knobs under the lock so a concurrent
+	// dashboard edit (SetMLSettings) can't tear a read mid-request.
+	w.mu.RLock()
 	lower, upper := w.config.MLGrayLower, w.config.MLGrayUpper
+	attackBump, normalPenalty := w.config.MLAttackBump, w.config.MLNormalPenalty
+	minConfidence := w.config.MLConfidenceMinimum
+	maxTextLen := w.config.MLMaxTextLen
+	w.mu.RUnlock()
+
+	score := evalResult.TotalScore
 	if upper <= lower {
 		// Misconfigured band — disable rather than guess.
 		return mlVerdictRecord{}
@@ -1194,7 +941,7 @@ func (w *WAFMiddleware) runMLInference(
 	// Canonical full-request format — matches model_v5+ training input.
 	// Redact() masks secrets the model never saw (same path as the training
 	// logger), keeping the byte distribution at inference identical to train.
-	text := training.Redact(training.BuildCanonicalText(parsed, evalResult, w.config.MLMaxTextLen))
+	text := training.Redact(training.BuildCanonicalText(parsed, evalResult, maxTextLen))
 	if text == "" {
 		return mlVerdictRecord{}
 	}
@@ -1218,17 +965,29 @@ func (w *WAFMiddleware) runMLInference(
 
 	// Only apply the adjustment when the model is sure. Hedged predictions
 	// (~50/50) carry no signal worth overriding the rule engine with.
-	if resp.Confidence < w.config.MLConfidenceMinimum {
+	if resp.Confidence < minConfidence {
 		return verdict
 	}
 
 	if resp.IsAttack {
-		verdict.adjustment = w.config.MLAttackBump
+		// Confident attack → bump the score up, typically over block_threshold.
+		verdict.adjustment = attackBump
+		evalResult.TotalScore = score + attackBump
 	} else {
-		verdict.adjustment = -w.config.MLNormalPenalty
-	}
-	if verdict.adjustment != 0 {
-		evalResult.TotalScore = score + verdict.adjustment
+		// Confident normal → clear the request to ALLOW. Because any positive
+		// score is now MONITOR, simply subtracting normalPenalty would leave a
+		// matched-rule request flagged (it would land in (0, monitor) and stay
+		// MONITOR). Zeroing the score lets a confidently-clean request pass as
+		// ALLOW — this is what removes the gray-zone false positives the model
+		// is there to catch. normalPenalty is kept as the *minimum* drop so the
+		// logged adjustment is never smaller in magnitude than the configured
+		// penalty.
+		drop := score
+		if normalPenalty > drop {
+			drop = normalPenalty
+		}
+		verdict.adjustment = -drop
+		evalResult.TotalScore = score - drop
 		if evalResult.TotalScore < 0 {
 			evalResult.TotalScore = 0
 		}

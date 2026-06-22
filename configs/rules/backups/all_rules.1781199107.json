@@ -218,7 +218,7 @@
     "info": {
       "category": "sqli",
       "severity": "critical",
-      "description": "Stacked queries (; INSERT/UPDATE/DELETE/DROP/CREATE) or quote-terminated DML",
+      "description": "Stacked queries (; INSERT/UPDATE/DELETE/DROP/CREATE)",
       "tags": [
         "sqli",
         "crs-942180"
@@ -243,10 +243,6 @@
         {
           "type": "regex",
           "value": "[;\\)]\\s*(insert|update|delete|drop|create|alter|truncate|grant|revoke|exec)\\b"
-        },
-        {
-          "type": "regex",
-          "value": "['\"`]\\s+(delete\\s+from|insert\\s+into|update\\s+\\w+\\s+set|drop\\s+(table|database|index|view)|truncate\\s+table|create\\s+(table|database|index|view))"
         }
       ]
     },
@@ -1965,30 +1961,26 @@
         "source": "args"
       },
       {
-        "source": "body"
-      },
-      {
         "source": "path"
       }
     ],
     "transforms": [
-      "url_decode",
-      "lowercase"
+      "url_decode"
     ],
     "detect": {
       "patterns": [
         {
           "type": "regex",
-          "value": "[\\r\\n][\\r\\n \\t]*(set-cookie|location|content-type|content-length|x-forwarded|x-frame-options|access-control|www-authenticate|pragma|cache-control|transfer-encoding)\\s*:"
+          "value": "%0d%0a"
         },
         {
           "type": "regex",
-          "value": "(?:%0d|%0a|%250d|%250a)[\\s%a-f0-9]*(set-cookie|location|content-type)\\s*(?:%3a|:)"
+          "value": "\\r\\n[a-z-]+:"
         }
       ]
     },
     "action": {
-      "score": 5,
+      "score": 4,
       "labels": [
         "attack:crlf-injection"
       ],

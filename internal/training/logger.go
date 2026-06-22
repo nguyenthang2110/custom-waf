@@ -29,7 +29,7 @@ type Record struct {
 	UserAgent         string            `json:"user_agent,omitempty"`
 	Headers           map[string]string `json:"headers,omitempty"`
 	ClientIP          string            `json:"client_ip"`
-	Decision          string            `json:"decision"` // BLOCK | ALLOW | CHALLENGE | LOG (full granularity)
+	Decision          string            `json:"decision"` // BLOCK | MONITOR | ALLOW (full granularity)
 	RuleScore         float64           `json:"rule_score"`
 	MatchedRuleIDs    []string          `json:"matched_rule_ids,omitempty"`
 	MatchedCategories []string          `json:"matched_categories,omitempty"`
@@ -177,11 +177,12 @@ func (l *Logger) Log(
 }
 
 // deriveLabel collapses the WAF decision down to the binary label most
-// classifiers want. CHALLENGE counts as block — the engine wasn't sure
-// it was clean. LOG and ALLOW are treated as allow.
+// classifiers want. Only BLOCK (the request that was actually rejected)
+// counts as block; MONITOR and ALLOW were both forwarded to the upstream,
+// so they are treated as allow.
 func deriveLabel(decision string) string {
 	switch strings.ToUpper(decision) {
-	case "BLOCK", "CHALLENGE":
+	case "BLOCK":
 		return "block"
 	default:
 		return "allow"
@@ -231,7 +232,7 @@ func shouldSkipBuiltin(path string) bool {
 	infraPrefix := []string{
 		"/health", "/healthz", "/ping", "/status", "/metrics",
 		"/dashboard", "/waf-api/",
-		"/login.html", "/register.html",
+		"/login.html",
 		"/socket.io/", "/sockjs-node/", "/_ws/", "/ws/",
 		"/assets/", "/public/", "/static/",
 		"/robots.txt", "/favicon.ico", "/sitemap.xml", "/.well-known/",

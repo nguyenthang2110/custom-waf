@@ -5,33 +5,33 @@ import (
 	"waf-project/internal/audit"
 )
 
-func TestClearLogBuffer(t *testing.T) {
+func TestClearAccessBuffer(t *testing.T) {
 	// Setup
-	ClearLogBuffer()
-	if len(logBuffer) != 0 {
-		t.Errorf("Expected buffer to be empty initially, got %d", len(logBuffer))
+	ClearAccessBuffer()
+	if len(GetAccessBuffer()) != 0 {
+		t.Errorf("Expected buffer to be empty initially, got %d", len(GetAccessBuffer()))
 	}
 
 	// Add logs
 	entry := &audit.AuditEntry{
 		RequestID: "test-1",
 	}
-	AddToLogBuffer(entry)
+	AddToAccessBuffer(entry)
 
-	if len(logBuffer) != 1 {
-		t.Errorf("Expected buffer to have 1 entry, got %d", len(logBuffer))
+	if len(GetAccessBuffer()) != 1 {
+		t.Errorf("Expected buffer to have 1 entry, got %d", len(GetAccessBuffer()))
 	}
 
 	// Clear logs
-	ClearLogBuffer()
+	ClearAccessBuffer()
 
-	if len(logBuffer) != 0 {
-		t.Errorf("Expected buffer to be empty after clear, got %d", len(logBuffer))
+	if len(GetAccessBuffer()) != 0 {
+		t.Errorf("Expected buffer to be empty after clear, got %d", len(GetAccessBuffer()))
 	}
 
 	// Verify we can add again
-	AddToLogBuffer(entry)
-	if len(logBuffer) != 1 {
-		t.Errorf("Expected buffer to have 1 entry after re-add, got %d", len(logBuffer))
+	AddToAccessBuffer(entry)
+	if len(GetAccessBuffer()) != 1 {
+		t.Errorf("Expected buffer to have 1 entry after re-add, got %d", len(GetAccessBuffer()))
 	}
 }

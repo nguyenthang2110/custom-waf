@@ -29,6 +29,7 @@ const (
 	KeyBackend   = "backend"
 	KeyWhitelist = "whitelist_ips"
 	KeyBlacklist = "blacklist_ips"
+	KeyML        = "ml"
 )
 
 // Store is the typed wrapper around the waf_runtime_config table.
@@ -112,9 +113,8 @@ func (s *Store) LoadInto(
 		switch key {
 		case KeyDecision:
 			var d struct {
-				BlockThreshold     float64  `json:"block_threshold"`
-				ChallengeThreshold float64  `json:"challenge_threshold"`
-				BypassPaths        []string `json:"bypass_paths"`
+				BlockThreshold   float64 `json:"block_threshold"`
+				MonitorThreshold float64 `json:"monitor_threshold"`
 			}
 			if err := json.Unmarshal(raw, &d); err != nil {
 				return applied, outBackend, fmt.Errorf("configstore: decode decision: %w", err)
@@ -123,13 +123,10 @@ func (s *Store) LoadInto(
 			if d.BlockThreshold > 0 {
 				cfg.BlockThreshold = d.BlockThreshold
 			}
-			if d.ChallengeThreshold > 0 {
-				cfg.ChallengeThreshold = d.ChallengeThreshold
+			if d.MonitorThreshold > 0 {
+				cfg.MonitorThreshold = d.MonitorThreshold
 			}
 			de.SetConfig(cfg)
-			if d.BypassPaths != nil {
-				de.SetBypassPaths(d.BypassPaths)
-			}
 			applied++
 
 		case KeyRateLimit:
@@ -152,6 +149,24 @@ func (s *Store) LoadInto(
 				cfg.EndpointLimits = r.EndpointLimits
 			}
 			rl.SetConfig(cfg)
+			applied++
+
+		case KeyML:
+			// Only restorable when the WAF middleware implements the applier.
+			applier, ok := wafBackend.(MLConfigApplier)
+			if !ok {
+				continue
+			}
+			var m struct {
+				Enabled             bool    `json:"enabled"`
+				AttackBump          float64 `json:"attack_bump"`
+				NormalPenalty       float64 `json:"normal_penalty"`
+				ConfidenceThreshold float64 `json:"confidence_threshold"`
+			}
+			if err := json.Unmarshal(raw, &m); err != nil {
+				return applied, outBackend, fmt.Errorf("configstore: decode ml: %w", err)
+			}
+			applier.SetMLSettings(m.Enabled, m.AttackBump, m.NormalPenalty, m.ConfidenceThreshold)
 			applied++
 
 		case KeyBackend:
@@ -215,4 +230,11 @@ func (s *Store) LoadInto(
 // BackendUpdater is the slice of WAFMiddleware needed to swap the upstream URL.
 type BackendUpdater interface {
 	UpdateBackend(url string) error
+}
+
+// MLConfigApplier is the optional slice of WAFMiddleware needed to restore the
+// persisted ML gray-zone knobs. LoadInto type-asserts the BackendUpdater to
+// this so older callers (and tests) that don't implement it still compile.
+type MLConfigApplier interface {
+	SetMLSettings(enabled bool, attackBump, normalPenalty, confidence float64)
 }

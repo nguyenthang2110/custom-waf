@@ -55,8 +55,23 @@ __pycache__/
 # Local training artifacts, checkpoints, and datasets
 /model_v*/
 /model_zip_*/
+/model_v*.zip
 /train_export/
 /ml-service/model_*/
 checkpoints/
 checkpoint-*/
 runs/
+
+# Evaluation harness — ignore large datasets + regenerable run outputs, but
+# keep the CRS baseline source (eval/crsbench/) in git. CSIC 2010 is
+# re-downloadable (see docs/EVALUATION.md); results rebuild via
+# `go run ./cmd/wafbench` + scripts/eval_ood_v7.py.
+eval/datasets/
+eval/results/
+
+# Thesis LaTeX sources & build artifacts — not part of the WAF runtime.
+thesis/
+
+# Editor/OS & tool junk
+.DS_Store
+.codegraph/

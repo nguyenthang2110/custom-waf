@@ -18,10 +18,10 @@ type Collector struct {
 	responseSize    prometheus.Histogram
 
 	// WAF decision metrics
-	decisionsTotal  *prometheus.CounterVec
-	blockedTotal    prometheus.Counter
-	challengedTotal prometheus.Counter
-	allowedTotal    prometheus.Counter
+	decisionsTotal *prometheus.CounterVec
+	blockedTotal   prometheus.Counter
+	monitoredTotal prometheus.Counter
+	allowedTotal   prometheus.Counter
 
 	// Anomaly score metrics
 	anomalyScore      prometheus.Histogram
@@ -75,16 +75,16 @@ type ClientStat struct {
 
 // MetricsStats holds internal statistics
 type MetricsStats struct {
-	StartTime       time.Time
-	TotalRequests   int64
-	TotalBlocked    int64
-	TotalChallenged int64
-	TotalAllowed    int64
-	TotalLatency    time.Duration
-	UniqueClients   int
-	TopRules        map[string]int64
-	TopCategories   map[string]int64
-	Clients         map[string]*ClientStat
+	StartTime      time.Time
+	TotalRequests  int64
+	TotalBlocked   int64
+	TotalMonitored int64
+	TotalAllowed   int64
+	TotalLatency   time.Duration
+	UniqueClients  int
+	TopRules       map[string]int64
+	TopCategories  map[string]int64
+	Clients        map[string]*ClientStat
 }
 
 // NewCollector creates a new metrics collector
@@ -165,10 +165,10 @@ func (c *Collector) initDecisionMetrics() {
 		},
 	)
 
-	c.challengedTotal = promauto.NewCounter(
+	c.monitoredTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
-			Name: "waf_challenged_total",
-			Help: "Total number of challenged requests",
+			Name: "waf_monitored_total",
+			Help: "Total number of monitored (flagged but forwarded) requests",
 		},
 	)
 
@@ -368,9 +368,9 @@ func (c *Collector) RecordRequest(decision string, score float64) {
 	switch decision {
 	case "BLOCK":
 		c.stats.TotalBlocked++
-	case "CHALLENGE":
-		c.stats.TotalChallenged++
-	case "ALLOW", "LOG":
+	case "MONITOR":
+		c.stats.TotalMonitored++
+	case "ALLOW":
 		c.stats.TotalAllowed++
 	}
 	c.mu.Unlock()
@@ -381,8 +381,8 @@ func (c *Collector) RecordRequest(decision string, score float64) {
 
 	if decision == "BLOCK" {
 		c.blockedTotal.Inc()
-	} else if decision == "CHALLENGE" {
-		c.challengedTotal.Inc()
+	} else if decision == "MONITOR" {
+		c.monitoredTotal.Inc()
 	} else {
 		c.allowedTotal.Inc()
 	}
@@ -524,16 +524,16 @@ func (c *Collector) GetStats() *MetricsStats {
 	defer c.mu.RUnlock()
 
 	return &MetricsStats{
-		StartTime:       c.stats.StartTime,
-		TotalRequests:   c.stats.TotalRequests,
-		TotalBlocked:    c.stats.TotalBlocked,
-		TotalChallenged: c.stats.TotalChallenged,
-		TotalAllowed:    c.stats.TotalAllowed,
-		TotalLatency:    c.stats.TotalLatency,
-		UniqueClients:   c.stats.UniqueClients,
-		TopRules:        copyMap(c.stats.TopRules),
-		TopCategories:   copyMap(c.stats.TopCategories),
-		Clients:         copyClients(c.stats.Clients),
+		StartTime:      c.stats.StartTime,
+		TotalRequests:  c.stats.TotalRequests,
+		TotalBlocked:   c.stats.TotalBlocked,
+		TotalMonitored: c.stats.TotalMonitored,
+		TotalAllowed:   c.stats.TotalAllowed,
+		TotalLatency:   c.stats.TotalLatency,
+		UniqueClients:  c.stats.UniqueClients,
+		TopRules:       copyMap(c.stats.TopRules),
+		TopCategories:  copyMap(c.stats.TopCategories),
+		Clients:        copyClients(c.stats.Clients),
 	}
 }
 

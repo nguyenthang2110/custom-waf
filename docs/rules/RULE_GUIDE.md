@@ -364,7 +364,6 @@ Ví dụ AND:
   "labels":  ["attack:sqli"],
   "log":     true,
   "block":   false,
-  "challenge": false,
 
   "ml_confirm": {
     "enabled":            false,
@@ -418,13 +417,12 @@ Quy ước:
 - `bypass:<reason>` — đánh dấu bỏ qua
 - `bot:<heuristic>` — bot indicator
 
-### `log` / `block` / `challenge`
+### `log` / `block`
 
 | Field | Ý nghĩa |
 |---|---|
 | `log` | Ghi vào audit log với severity từ `info.severity`. Mặc định `true`. |
 | `block` | **Force block** ngay cả khi score chưa tới threshold. Dùng cho rule "thấy là chặn" (vd log4shell payload). |
-| `challenge` | Gửi CAPTCHA/PoW thay vì block thẳng. Dùng cho ATO/brute-force. |
 
 Quy tắc:
 - 99% rule chỉ cần `log: true, block: false` — để score model quyết định.

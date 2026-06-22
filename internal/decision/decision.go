@@ -78,12 +78,11 @@ func (e *IPListEntry) UnmarshalJSON(data []byte) error {
 // DecisionConfig defines decision engine configuration
 type DecisionConfig struct {
 	// Thresholds
-	BlockThreshold     float64 // Score >= this → BLOCK
-	ChallengeThreshold float64 // Score >= this → CHALLENGE
-	LogThreshold       float64 // Score >= this → LOG
+	BlockThreshold   float64 // Score >= this → BLOCK
+	MonitorThreshold float64 // Score >= this AND > 0 → MONITOR (forwarded, flagged). Default 0 = any matched-rule request.
 
 	// Default actions
-	DefaultAction string // ALLOW, BLOCK, CHALLENGE
+	DefaultAction string // ALLOW, BLOCK
 
 	// Behavior integration
 	UseBehaviorScore    bool    // Consider behavior analysis
@@ -93,20 +92,10 @@ type DecisionConfig struct {
 	EnableWhitelist bool
 	EnableBlacklist bool
 
-	// Challenge settings
-	ChallengeEnabled bool
-	ChallengeTimeout time.Duration
-
 	// Advanced features
 	AdaptiveThreshold bool // Adjust threshold based on traffic
 	GeoBlocking       bool // Block specific countries
 	BlockedCountries  []string
-
-	// User-configurable list of path prefixes that bypass WAF inspection
-	// AND audit logging. Joined with the built-in IsRealtimePath /
-	// IsHealthCheckPath lists. Useful for noisy app-specific endpoints
-	// (heartbeats, internal polling) you want to silence at runtime.
-	BypassPathPrefixes []string
 }
 
 // DecisionStats tracks decision statistics
@@ -114,8 +103,7 @@ type DecisionStats struct {
 	TotalDecisions int64
 	AllowCount     int64
 	BlockCount     int64
-	ChallengeCount int64
-	LogCount       int64
+	MonitorCount   int64
 	WhitelistHits  int64
 	BlacklistHits  int64
 	mu             sync.RWMutex
@@ -123,7 +111,7 @@ type DecisionStats struct {
 
 // DecisionResult contains the final decision
 type DecisionResult struct {
-	Decision        string                 // ALLOW, BLOCK, CHALLENGE, LOG
+	Decision        string                 // ALLOW, BLOCK, MONITOR
 	Reason          string                 // Why this decision was made
 	FinalScore      float64                // Combined score
 	RuleScore       float64                // Score from rule engine
@@ -131,7 +119,6 @@ type DecisionResult struct {
 	IsWhitelisted   bool                   // From whitelist
 	IsBlacklisted   bool                   // From blacklist
 	BlockDuration   time.Duration          // How long to block
-	ChallengeType   string                 // Type of challenge to present
 	ResponseCode    int                    // HTTP status code to return
 	ResponseMessage string                 // Message to return
 	Metadata        map[string]interface{} // Additional context
@@ -143,20 +130,15 @@ func NewDecisionEngine(config DecisionConfig) *DecisionEngine {
 	if config.BlockThreshold == 0 {
 		config.BlockThreshold = 10.0
 	}
-	if config.ChallengeThreshold == 0 {
-		config.ChallengeThreshold = 5.0
-	}
-	if config.LogThreshold == 0 {
-		config.LogThreshold = 3.0
-	}
+	// MonitorThreshold default is 0 ("monitor any request that scored > 0",
+	// i.e. matched at least one rule). It is intentionally NOT defaulted to a
+	// positive value — 0 is the meaningful default. Operators can raise it via
+	// the dashboard to suppress low-score noise.
 	if config.DefaultAction == "" {
 		config.DefaultAction = "ALLOW"
 	}
 	if config.BehaviorScoreWeight == 0 {
 		config.BehaviorScoreWeight = 0.3 // 30% weight
-	}
-	if config.ChallengeTimeout == 0 {
-		config.ChallengeTimeout = 5 * time.Minute
 	}
 
 	return &DecisionEngine{
@@ -254,24 +236,24 @@ func (de *DecisionEngine) DecideWithDetails(
 			de.stats.BlockCount++
 		})
 
-	} else if finalScore >= de.config.ChallengeThreshold && de.config.ChallengeEnabled {
-		result.Decision = "CHALLENGE"
-		result.Reason = de.buildReason("Score exceeds challenge threshold", evalResult, behaviorResult)
-		result.ResponseCode = 429
-		result.ResponseMessage = "Please complete the challenge"
-		result.ChallengeType = de.selectChallengeType(finalScore)
-
-		de.updateStats(func() {
-			de.stats.ChallengeCount++
-		})
-
-	} else if finalScore >= de.config.LogThreshold {
-		result.Decision = "LOG"
-		result.Reason = de.buildReason("Score exceeds log threshold", evalResult, behaviorResult)
+	} else if finalScore > 0 && finalScore >= de.config.MonitorThreshold {
+		// MONITOR: the request matched at least one rule (score > 0) but
+		// stayed below the block threshold. It is still forwarded to the
+		// upstream — this verdict only flags it as suspicious in the access
+		// log so operators can review it. Only a fully-clean request (score
+		// 0, no rule matched) gets ALLOW. Note the ML gray-zone hook can
+		// clear a confidently-normal request back to score 0 BEFORE this
+		// point, so a matched-rule request the model vouches for still
+		// becomes ALLOW (see middleware.runMLInference).
+		//
+		// MonitorThreshold defaults to 0 ("any positive score"); an operator
+		// can raise it via the dashboard to suppress low-score noise.
+		result.Decision = "MONITOR"
+		result.Reason = de.buildReason("Request matched rules (monitored)", evalResult, behaviorResult)
 		result.ResponseCode = 200
 
 		de.updateStats(func() {
-			de.stats.LogCount++
+			de.stats.MonitorCount++
 		})
 
 	} else {
@@ -290,7 +272,7 @@ func (de *DecisionEngine) DecideWithDetails(
 			// Capture the original decision BEFORE overwriting, otherwise
 			// the stat-adjust branches below would all compare against
 			// "BLOCK" and never decrement the original counter — the
-			// previous version inflated AllowCount/ChallengeCount whenever
+			// previous version inflated AllowCount/MonitorCount whenever
 			// behavior detection escalated a request to BLOCK.
 			origDecision := result.Decision
 
@@ -303,10 +285,8 @@ func (de *DecisionEngine) DecideWithDetails(
 				switch origDecision {
 				case "ALLOW":
 					de.stats.AllowCount--
-				case "CHALLENGE":
-					de.stats.ChallengeCount--
-				case "LOG":
-					de.stats.LogCount--
+				case "MONITOR":
+					de.stats.MonitorCount--
 				}
 				de.stats.BlockCount++
 			})
@@ -390,16 +370,6 @@ func (de *DecisionEngine) calculateBlockDuration(score float64) time.Duration {
 		return 1 * time.Hour // Medium: 1 hour
 	}
 	return 15 * time.Minute // Low: 15 minutes
-}
-
-// selectChallengeType determines what type of challenge to present
-func (de *DecisionEngine) selectChallengeType(score float64) string {
-	if score >= 8.0 {
-		return "CAPTCHA" // Hard challenge
-	} else if score >= 6.0 {
-		return "JS_CHALLENGE" // JavaScript proof-of-work
-	}
-	return "RATE_LIMIT" // Simple rate limit
 }
 
 // entryActive reports whether a map value (interpreted as expires_at)
@@ -572,8 +542,7 @@ func (de *DecisionEngine) GetStats() *DecisionStats {
 		TotalDecisions: de.stats.TotalDecisions,
 		AllowCount:     de.stats.AllowCount,
 		BlockCount:     de.stats.BlockCount,
-		ChallengeCount: de.stats.ChallengeCount,
-		LogCount:       de.stats.LogCount,
+		MonitorCount:   de.stats.MonitorCount,
 		WhitelistHits:  de.stats.WhitelistHits,
 		BlacklistHits:  de.stats.BlacklistHits,
 	}
@@ -598,8 +567,7 @@ func (de *DecisionEngine) ResetStats() {
 	de.stats.TotalDecisions = 0
 	de.stats.AllowCount = 0
 	de.stats.BlockCount = 0
-	de.stats.ChallengeCount = 0
-	de.stats.LogCount = 0
+	de.stats.MonitorCount = 0
 	de.stats.WhitelistHits = 0
 	de.stats.BlacklistHits = 0
 }
@@ -637,12 +605,12 @@ func (de *DecisionEngine) AdjustThreshold(blockRate float64) {
 	// If block rate is too high, increase threshold (be more lenient)
 	if blockRate > 10.0 {
 		de.config.BlockThreshold *= 1.1
-		de.config.ChallengeThreshold *= 1.1
+		de.config.MonitorThreshold *= 1.1
 	}
 	// If block rate is too low, decrease threshold (be more strict)
 	if blockRate < 1.0 {
 		de.config.BlockThreshold *= 0.9
-		de.config.ChallengeThreshold *= 0.9
+		de.config.MonitorThreshold *= 0.9
 	}
 
 	// Keep thresholds within reasonable bounds
@@ -668,8 +636,7 @@ func (de *DecisionEngine) IsHealthCheckPath(path string) bool {
 		"/metrics",
 		"/dashboard",  // WAF dashboard UI (static)
 		"/waf-api/",   // WAF management API (auth-protected)
-		"/login.html", // WAF auth pages
-		"/register.html",
+		"/login.html", // WAF auth page
 	}
 
 	for _, hcp := range healthCheckPaths {
@@ -721,7 +688,6 @@ func (de *DecisionEngine) ShouldBypassWAF(req *engine.ParsedRequest) bool {
 //	""          — no bypass, run the full pipeline
 //	"health"    — built-in health/dashboard/api-management path
 //	"realtime"  — websocket / long-poll transport
-//	"path"      — user-configured bypass prefix
 //
 // Blacklisted IPs are NEVER bypassed; this method returns "" for them so
 // the request flows into the rule engine and gets explicitly blocked.
@@ -734,9 +700,6 @@ func (de *DecisionEngine) BypassReason(req *engine.ParsedRequest) string {
 	}
 	if de.IsRealtimePath(req.NormalizedPath) {
 		return "realtime"
-	}
-	if de.matchesBypassPrefix(req.NormalizedPath) {
-		return "path"
 	}
 	return ""
 }
@@ -757,51 +720,6 @@ func (de *DecisionEngine) IsWhitelistedIP(ip string) bool {
 	}
 	exp, ok := de.whitelistIPs[ip]
 	return ok && entryActive(exp)
-}
-
-// matchesBypassPrefix returns true when path starts with any of the
-// runtime-configurable bypass prefixes. The list is small in practice,
-// so a linear scan is cheaper than building a trie.
-func (de *DecisionEngine) matchesBypassPrefix(path string) bool {
-	prefixes := de.config.BypassPathPrefixes
-	for _, p := range prefixes {
-		if p == "" {
-			continue
-		}
-		if strings.HasPrefix(path, p) {
-			return true
-		}
-	}
-	return false
-}
-
-// GetBypassPaths returns the user-configured bypass prefixes (excluding
-// built-in lists) — used by the API for the dashboard.
-func (de *DecisionEngine) GetBypassPaths() []string {
-	de.mu.RLock()
-	defer de.mu.RUnlock()
-	out := make([]string, 0, len(de.config.BypassPathPrefixes))
-	out = append(out, de.config.BypassPathPrefixes...)
-	return out
-}
-
-// SetBypassPaths replaces the user-configured bypass prefix list. Empty
-// strings are filtered out and entries are de-duplicated to keep the list
-// tidy when the dashboard pushes the whole array on each edit.
-func (de *DecisionEngine) SetBypassPaths(paths []string) {
-	seen := make(map[string]bool, len(paths))
-	out := make([]string, 0, len(paths))
-	for _, p := range paths {
-		p = strings.TrimSpace(p)
-		if p == "" || seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, p)
-	}
-	de.mu.Lock()
-	de.config.BypassPathPrefixes = out
-	de.mu.Unlock()
 }
 
 // SetWhitelistIPs / SetBlacklistIPs replace the entire allow/deny set

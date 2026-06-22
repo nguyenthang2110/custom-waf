@@ -9,9 +9,9 @@
 ## TÓM TẮT NỘI DUNG
 
 Đồ án xây dựng một hệ thống Tường lửa Ứng dụng Web (WAF) hiệu năng cao viết bằng Go,
-kết hợp hai lớp phát hiện tấn công: (1) engine dựa trên luật với 36 quy tắc bao phủ 12
+kết hợp hai lớp phát hiện tấn công: (1) engine dựa trên luật với 78 quy tắc bao phủ 13
 nhóm lỗ hổng OWASP Top 10, và (2) mô hình phân loại DistilBERT fine-tuned nhận dạng 10
-loại tấn công, được kích hoạt trong "vùng xám" khi điểm anomaly nằm trong khoảng 4.0–4.99.
+loại tấn công, được kích hoạt trong "vùng xám" khi điểm anomaly nằm trong khoảng [3.0, 5.0).
 Hệ thống cung cấp Dashboard giám sát thời gian thực, hệ thống xác thực JWT với RBAC ba
 vai trò (admin / editor / viewer), trang quản lý tài khoản tự phục vụ và trang quản trị
 người dùng dành cho admin, rate limiting theo thuật toán Token Bucket, và triển khai
@@ -32,7 +32,7 @@ hoàn chỉnh qua Docker.
 ### 1.2 Mục tiêu và phạm vi đề tài
 **Mục tiêu:**
 - Xây dựng WAF reverse-proxy hiệu năng cao (Go) có thể triển khai thực tế
-- Rule engine với bộ luật chuẩn hóa 36 rules / 12 nhóm tấn công
+- Rule engine với bộ luật chuẩn hóa 78 rules / 13 nhóm tấn công
 - Tích hợp mô hình ML (DistilBERT) làm lớp kiểm chứng thứ hai trong vùng xám
 - Dashboard quản trị và giám sát real-time
 - Pipeline huấn luyện và đánh giá mô hình ML có thể tái lập
@@ -97,14 +97,14 @@ hoàn chỉnh qua Docker.
 
 #### 2.2.6 Ca sử dụng: Cấu hình hệ thống
 - Cấu hình backend target URL
-- Bật/tắt require_auth, ngưỡng block/challenge/log
+- Bật/tắt require_auth, ngưỡng block/monitor
 - Cấu hình ML service endpoint
 
 #### 2.2.7 Ca sử dụng: Cảnh báo sự kiện bảo mật (Alert / Notification)
 - Actor: Admin, Hệ thống notifier (background worker)
 - Trigger: WAF phát hiện sự kiện có severity ≥ ngưỡng cấu hình (mặc định HIGH)
 - Luồng chính:
-  1. Decision layer phát sự kiện BLOCK/CHALLENGE → notifier.Send() (async, không block)
+  1. Decision layer phát sự kiện BLOCK → notifier.Send() (async, không block)
   2. Worker kiểm tra throttle (dedup theo IP + ruleID trong cửa sổ 5 phút)
   3. Fan-out đến các kênh đã bật: Slack, Email (SMTP), Webhook tùy chỉnh
   4. Ghi stats (sent_count / failed_count) cho từng destination
@@ -112,13 +112,14 @@ hoàn chỉnh qua Docker.
 - Admin cũng có thể gửi test notification để xác nhận kênh đã cấu hình đúng
 
 #### 2.2.8 Ca sử dụng: Xác thực và phân quyền (Auth)
-- Đăng ký / đăng nhập, JWT lưu trong HttpOnly cookie + hỗ trợ Bearer header
+- Đăng nhập, JWT lưu trong HttpOnly cookie + hỗ trợ Bearer header
 - RBAC 3 vai trò:
   - **admin**: toàn quyền (quản lý user, cấu hình, rule, IP, notification)
   - **editor**: được phép thay đổi cấu hình WAF (rule, IP list, settings) nhưng không
     quản trị tài khoản người khác
   - **viewer**: chỉ đọc dashboard và log
-- Public `/register` chỉ tạo được account viewer (đóng lỗ leo thang đặc quyền)
+- Không có đăng ký công khai: tài khoản chỉ được admin tạo qua `POST /waf-api/auth/users`
+  (đóng lỗ leo thang đặc quyền). Tài khoản admin khởi tạo mặc định là `admin/admin`.
 
 #### 2.2.9 Ca sử dụng: Quản lý tài khoản cá nhân (Account Settings)
 - Actor: mọi user đã đăng nhập
@@ -142,12 +143,12 @@ hoàn chỉnh qua Docker.
 #### 2.3.1 Đặc tả: Kiểm tra request và đưa ra quyết định
 - Input: HTTP request (method, path, query, headers, body)
 - Processing: normalize → match rules → anomaly scoring → [ML confirm nếu vùng xám]
-- Output: ALLOW / CHALLENGE / BLOCK + audit log entry
-- Ngưỡng: log ≥ 3.0, challenge ≥ 5.0, block ≥ 10.0
+- Output: ALLOW / MONITOR / BLOCK + audit log entry
+- Ngưỡng (config.yaml): monitor_threshold mặc định = 0 (mọi điểm dương → MONITOR), block ≥ 5.0
 
 #### 2.3.2 Đặc tả: Xử lý anomaly scoring
 - Mỗi rule match cộng điểm (anomaly_score × severity_multiplier)
-- Vùng xám [4.0, 5.0): gọi ML service → nếu ML xác nhận tấn công: +delta, nếu ML
+- Vùng xám [3.0, 5.0): gọi ML service → nếu ML xác nhận tấn công: +delta, nếu ML
   xác nhận normal: −delta
 - Quyết định cuối dựa trên tổng điểm sau điều chỉnh ML
 
@@ -205,9 +206,9 @@ hoàn chỉnh qua Docker.
 - Các trường: conditions, transforms, patterns, scoring, actions, exceptions
 - Phase: REQUEST (hiện tại), có thể mở rộng sang RESPONSE
 
-#### 3.2.3 Bộ luật 36 rules / 12 nhóm
-*(Bảng liệt kê các nhóm: SQLi, XSS, RCE, Path Traversal, SSRF, XXE, NoSQLi,
-Log4j, Shellshock, Scanner Detection, Behavior Analysis, Rate Limit)*
+#### 3.2.3 Bộ luật 78 rules / 13 nhóm
+*(Bảng liệt kê các nhóm: rce, sqli, xss, lfi, ssrf, info_leak, custom, scanner,
+ato, nosqli, xxe, bot, dos)*
 
 ### 3.3 DistilBERT — Mô hình phân loại tấn công
 
@@ -277,7 +278,7 @@ Client → [WAF Proxy :8080/:8443]
               │
               ├── Rule Engine ──→ [ML Service :8000] (gray zone only)
               │
-              ├── Decision Layer (ALLOW/CHALLENGE/BLOCK)
+              ├── Decision Layer (ALLOW/MONITOR/BLOCK)
               │
               └── [Backend App] (Juice Shop, etc.)
 
@@ -289,10 +290,10 @@ Admin → [Dashboard :8443/web] → [WAF API /waf-api/*] → PostgreSQL
 2. Normalizer: URL decode, lowercase, whitespace compression
 3. IP check: blacklist → block ngay; whitelist → pass
 4. Rate limit check → block nếu vượt
-5. Rule engine: duyệt 36 rules → tính anomaly score
-6. Nếu score ∈ [4.0, 5.0): gọi ML service → điều chỉnh score
-7. Decision: score ≥ 10 → BLOCK; ≥ 5 → CHALLENGE; ≥ 3 → LOG; else ALLOW
-8. Forward request đến backend (nếu ALLOW/LOG)
+5. Rule engine: duyệt 78 rules → tính anomaly score
+6. Nếu score ∈ [3.0, 5.0): gọi ML service → điều chỉnh score
+7. Decision: score ≥ 5 → BLOCK; > 0 → MONITOR; else (score = 0) ALLOW
+8. Forward request đến backend (nếu ALLOW/MONITOR)
 9. Ghi audit log
 
 #### 4.1.3 Các thành phần chính và tương tác
@@ -314,9 +315,9 @@ Admin → [Dashboard :8443/web] → [WAF API /waf-api/*] → PostgreSQL
 
 #### 4.2.4 Anomaly scoring và decision
 - Tính tổng score từ tất cả rule match
-- `blockThreshold`, `challengeThreshold`, `logThreshold` cấu hình động
+- `blockThreshold`, `monitorThreshold` cấu hình động
 
-#### 4.2.5 Bộ luật 36 rules
+#### 4.2.5 Bộ luật 78 rules
 *(Bảng chi tiết: ID, category, severity, description, pattern chính)*
 
 ### 4.3 Thiết kế và triển khai ML Layer
@@ -339,7 +340,7 @@ Admin → [Dashboard :8443/web] → [WAF API /waf-api/*] → PostgreSQL
 #### 4.3.4 Pipeline huấn luyện và phiên bản model
 - Dataset: 10 nhóm tấn công + normal
 - Fine-tune từ DistilBERT-base-uncased
-- Versioning: v5 (baseline) → v6 (fail report) → v6.1 (patch plan)
+- Versioning: v5 (baseline) → v6 (fail report) → v7 (model production, 10 lớp)
 - Augmentation strategy cho các lớp yếu (cmdi, log4shell, ssti)
 
 ### 4.4 Thiết kế cơ sở dữ liệu
@@ -363,10 +364,9 @@ Admin → [Dashboard :8443/web] → [WAF API /waf-api/*] → PostgreSQL
 
 #### 4.5.2 Các màn hình chính
 - **Login** (`login.html`): form đăng nhập, JWT lưu HttpOnly cookie
-- **Register** (`register.html`): đăng ký tài khoản viewer (role không cho client chọn)
 - **Dashboard** (`index.html`): real-time counters (requests/s, block rate, top attack types)
 - **Logs**: bảng audit log có filter (IP, loại tấn công, thời gian)
-- **Rules**: danh sách 36 rules, filter theo category/severity, bật/tắt từng rule
+- **Rules**: danh sách 78 rules, filter theo category/severity, bật/tắt từng rule
 - **IP Management**: blacklist/whitelist CRUD
 - **System Settings**: cấu hình backend URL, ngưỡng, ML service URL
 - **Notifications**: cấu hình kênh alert (Slack webhook URL, SMTP, generic webhook),
@@ -379,7 +379,7 @@ Admin → [Dashboard :8443/web] → [WAF API /waf-api/*] → PostgreSQL
 #### 4.5.3 Hệ thống Theme đồng nhất
 - CSS custom properties với `[data-theme="dark"]` / `[data-theme="light"]`
 - Pre-paint bootstrap script đọc `localStorage.waf_theme` trước khi render → tránh FOUC
-- Nút toggle theme có mặt ở mọi trang (login, register, dashboard, settings, users)
+- Nút toggle theme có mặt ở mọi trang (login, dashboard, settings, users)
 - Tailwind CSS qua CDN + font Inter, glass-card layout thống nhất
 
 ### 4.6 Kiểm thử
@@ -393,31 +393,34 @@ Admin → [Dashboard :8443/web] → [WAF API /waf-api/*] → PostgreSQL
 #### 4.6.2 Kết quả kiểm thử rule engine (42 attack payloads OWASP)
 | Metric | Trước fix | Sau fix |
 |---|---|---|
-| Rules load vào engine | 17/36 | **36/36** |
+| Rules load vào engine | 17/78 | **78/78** |
 | Block rate (42 OWASP attacks) | 88.1% (37/42) | **97.6% (41/42)** |
 | Latency precision | 0 ms (làm tròn) | **0.13 ms (sub-ms)** |
 | Bypass: SQLi ORDER BY, RCE PHP, Shellshock | 5 lọt | **0 lọt** |
 
-#### 4.6.3 Kết quả kiểm thử ML model (v5 baseline trên 97 mẫu OOD)
-*(Bảng per-class P/R/F1, confusion matrix, binary attack precision/recall)*
+#### 4.6.3 Kết quả kiểm thử ML model (v7, 10 lớp, in-distribution)
+*(Bảng per-class P/R/F1, confusion matrix)*
 
-- Binary: attack precision = 0.976, recall = 0.988
-- Phân tích 11 misclassification: JSON-body bias, shell URL paths, log4shell obfuscation
+- In-distribution (trên phân bố huấn luyện tổng hợp): accuracy 0.9968, macro-F1 0.9959
+- Lưu ý: đây là metrics in-distribution, chưa phản ánh tổng quát hóa trên traffic thực
+- Đối chiếu với v5/v6 baseline (97 mẫu OOD): JSON-body bias, shell URL paths,
+  log4shell obfuscation là các failure pattern đã được augmentation khắc phục ở v7
 
 #### 4.6.4 Kết quả kiểm thử rate limiting
 - Block rate với 1500 burst: 65.6% (984/1500) sau fix
 
 #### 4.6.5 Kiểm thử bảo mật nội bộ (auth/authorization)
 - **Endpoint matrix**:
-  - Public: `/login`, `/register`, `/logout`
+  - Public: `/login`, `/logout`
   - Auth-only (mọi role): `/me`, `/me/password`
   - Admin-only: `/users`, `/users/{id}`, `/users/{id}/password`, các endpoint cấu hình WAF
 - **Test case chính**:
   - Gọi không có token → 401
   - Gọi với viewer token vào admin endpoint → 403
   - Gọi với admin token → 200
-- **Test privilege-escalation regression**: `POST /register` với body `{"role":"admin"}`
-  → user vẫn được tạo với role=`viewer` (đã bịt lỗ)
+- **Test không có đăng ký công khai**: không tồn tại endpoint `/register` hay trang
+  `register.html`; tài khoản chỉ tạo được qua `POST /waf-api/auth/users` (admin-gated)
+  → bịt hoàn toàn bề mặt tự tạo tài khoản / leo thang đặc quyền
 - **Test invariant bảo vệ**:
   - Xóa admin cuối cùng → 400 với message "cannot delete the last admin"
   - Demote admin cuối cùng từ admin → editor/viewer → 400
@@ -428,7 +431,7 @@ Admin → [Dashboard :8443/web] → [WAF API /waf-api/*] → PostgreSQL
 
 #### 4.7.1 Yêu cầu hệ thống
 - Docker + Docker Compose
-- 2GB RAM (thêm ~1GB cho ML service với model v5)
+- 2GB RAM (thêm ~1GB cho ML service với model v7)
 
 #### 4.7.2 Hướng dẫn triển khai (Docker Compose)
 ```bash
@@ -450,11 +453,11 @@ docker compose up ml -d      # ML service tại :8000
 #### 5.1.1 Đặt vấn đề
 - Rule-based đơn thuần: nhiều false positive hoặc phải hạ ngưỡng → bỏ sót
 - ML đơn thuần: latency cao, không giải thích được, không có rule logic
-- "Vùng xám" [4.0, 5.0): những request mơ hồ mà rule không đủ tự tin
+- "Vùng xám" [3.0, 5.0): những request mơ hồ mà rule không đủ tự tin
 
 #### 5.1.2 Giải pháp đề xuất
-- Layer 1 (rule engine): nhanh, giải thích được, xử lý rõ ràng (score < 4 hoặc ≥ 10)
-- Layer 2 (ML): chỉ kích hoạt khi score ∈ [4.0, 5.0) → tiết kiệm latency
+- Layer 1 (rule engine): nhanh, giải thích được, xử lý rõ ràng (score < 3 hoặc ≥ 5)
+- Layer 2 (ML): chỉ kích hoạt khi score ∈ [3.0, 5.0) → tiết kiệm latency
 - Delta adjustment: ML confirm tấn công → +score; ML xác nhận normal → −score
 - Fail-open: ML timeout/unavailable → giữ nguyên rule score
 
@@ -463,7 +466,7 @@ docker compose up ml -d      # ML service tại :8000
 - Bắt được biến thể tấn công mà rule regex không cover
 - So sánh: với vs. không có ML layer (precision/recall trên test set)
 
-### 5.2 Thiết kế bộ luật chuẩn hóa 36 rules với Transform Chain chống Evasion
+### 5.2 Thiết kế bộ luật chuẩn hóa 78 rules với Transform Chain chống Evasion
 
 #### 5.2.1 Đặt vấn đề
 - Attacker bypass rule regex bằng URL encoding, double encoding, case variation,
@@ -491,11 +494,12 @@ docker compose up ml -d      # ML service tại :8000
 - Augmentation chiến lược: phân tích misclassification → sinh thêm sample đúng dạng bị lỗi
 - Canonical text đồng bộ Go↔Python (7 fixture test cases)
 
-#### 5.3.3 Kết quả (v5 → v6 attempt)
-- v6 accuracy: 0.8866 (chưa đạt ≥ 0.92), cmdi F1: 0.818, log4shell F1: 0.857
-- Binary: attack precision 0.976, recall 0.988 (đã đạt)
+#### 5.3.3 Kết quả (v6 fail → v7 pass)
+- v6 accuracy: 0.8866 (chưa đạt ≥ 0.92), cmdi F1: 0.818, log4shell F1: 0.857 → bị gate
+  chặn, không ship
 - Root-cause 3 failure pattern: JSON-body bias, shell URL paths, log4shell obfuscation
-- Kế hoạch v6.1: 1800 augment samples có mục tiêu
+- Sau augmentation có mục tiêu, model v7 (10 lớp) vượt gate: accuracy 0.9968,
+  macro-F1 0.9959 (in-distribution) → đây là model production hiện hành
 
 ### 5.4 Thiết kế interface MLPredictor tách biệt Engine và ML Client
 
@@ -516,17 +520,18 @@ docker compose up ml -d      # ML service tại :8000
 ### 5.5 Củng cố lớp Auth: bịt lỗ leo thang đặc quyền và thêm Invariant bảo vệ
 
 #### 5.5.1 Đặt vấn đề
-- Trước fix: `RegisterRequest` chấp nhận trường `role` từ client → bất kỳ ai POST
-  `/register` với `{"role":"admin"}` cũng tạo được tài khoản quản trị
-- Hệ thống cũ không có cơ chế đổi mật khẩu sau đăng nhập → user dùng mật khẩu mặc
-  định `admin123` mãi
+- Đăng ký công khai (self-service sign-up) là bề mặt tấn công tạo tài khoản / leo thang
+  đặc quyền (ai cũng POST được `{"role":"admin"}` nếu endpoint chấp nhận trường `role`)
+- Hệ thống cần cơ chế đổi mật khẩu sau đăng nhập → không để user dùng mãi mật khẩu mặc
+  định `admin`
 - Thiếu trang quản trị tài khoản → không thể thu hồi/đổi role mà không truy cập DB
 - Có nguy cơ "khóa trái" (lockout) khi admin cuối cùng bị xóa hoặc tự demote
 
 #### 5.5.2 Giải pháp đề xuất
-- **Bịt lỗ leo thang đặc quyền**: loại bỏ hoàn toàn trường `role` khỏi
-  `RegisterRequest`, hard-code `const role = "viewer"` trong `handleRegister`.
-  Role chỉ có thể thay đổi qua endpoint admin riêng (`PUT /users/{id}`)
+- **Không có đăng ký công khai**: hệ thống không có endpoint `/register`, handler
+  `handleRegister` hay trang `register.html`. Tài khoản chỉ được admin tạo qua
+  `POST /waf-api/auth/users` (admin-gated); role chỉ thay đổi qua endpoint admin
+  (`PUT /users/{id}`) → bịt hoàn toàn bề mặt tự tạo tài khoản / leo thang đặc quyền
 - **Self-service password change**: endpoint `PUT /me/password` yêu cầu mật khẩu cũ
   trước khi cho đổi (chống takeover khi JWT bị đánh cắp)
 - **Trang quản trị user (admin only)**: tạo / sửa / reset password / xóa user, với
@@ -539,10 +544,11 @@ docker compose up ml -d      # ML service tại :8000
   hỗ trợ Bearer header cho API client
 
 #### 5.5.3 Kết quả
-- Pentest tự tạo `POST /register {"role":"admin"}` → user nhận về role=`viewer`
+- Không tồn tại endpoint `/register` hay trang `register.html` → không có đường tự tạo
+  tài khoản; tài khoản mới chỉ sinh ra qua `POST /waf-api/auth/users` (admin-gated)
 - Test invariant: 4 case (last-admin delete/demote, self-delete/demote) đều trả 400
 - 100% admin endpoint mới được gate qua `requireAdmin` middleware
-- Mật khẩu mặc định `admin123` giờ có thể đổi qua UI ngay sau lần đăng nhập đầu
+- Mật khẩu mặc định `admin` giờ có thể đổi qua UI ngay sau lần đăng nhập đầu
 
 ---
 
@@ -551,16 +557,16 @@ docker compose up ml -d      # ML service tại :8000
 ### 6.1 Kết luận
 
 **Kết quả đạt được:**
-- Hệ thống WAF reverse-proxy viết bằng Go với rule engine 36 rules, block rate 97.6% với
+- Hệ thống WAF reverse-proxy viết bằng Go với rule engine 78 rules, block rate 97.6% với
   42 OWASP payload chuẩn
-- Tích hợp thành công ML layer (DistilBERT 10 lớp) với cơ chế gray-zone activation,
-  binary attack precision 0.976 / recall 0.988
+- Tích hợp thành công ML layer (DistilBERT 10 lớp, model v7) với cơ chế gray-zone
+  activation; metrics in-distribution: accuracy 0.9968, macro-F1 0.9959
 - Dashboard quản trị hoàn chỉnh: real-time monitoring, log management, rule/IP management,
   account settings và admin user management — toàn bộ trang dùng chung theme (dark/light
   toggle, pre-paint script chống FOUC)
 - Auth system bảo mật: JWT HttpOnly cookie, bcrypt cost 10, RBAC 3 vai trò
-  (admin/editor/viewer), bịt lỗ leo thang đặc quyền qua `/register`, invariant chống
-  last-admin lockout, audit logging mọi thao tác user-management
+  (admin/editor/viewer), không có đăng ký công khai (tài khoản chỉ do admin tạo),
+  invariant chống last-admin lockout, audit logging mọi thao tác user-management
 - Pipeline huấn luyện ML có kiểm soát chất lượng (hard gate, augmentation)
 - Triển khai hoàn chỉnh qua Docker Compose
 
@@ -568,14 +574,19 @@ docker compose up ml -d      # ML service tại :8000
 *(Bảng đối chiếu mục tiêu ↔ kết quả đạt được)*
 
 **Hạn chế:**
-- Model v6 chưa đạt hard gate (accuracy 0.8866 < 0.92), hiện dùng v5
+- Metrics của model v7 (accuracy 0.9968, macro-F1 0.9959) là in-distribution trên phân
+  bố huấn luyện tổng hợp, chưa phản ánh khả năng tổng quát hóa trên traffic thực
+- Model v7 chưa bao phủ một số loại tấn công: LDAP/XPath injection, insecure
+  deserialization, business-logic/IDOR, evasion/obfuscation nâng cao, tấn công
+  hành vi/xác thực (behavioral/auth)
 - Chưa test với traffic production thực tế (chỉ lab/Juice Shop)
 - Rate limiting chỉ đạt 65.6% với burst 1500 (cần tune thêm)
 
 ### 6.2 Hướng phát triển
 
 #### 6.2.1 Ngắn hạn
-- Hoàn thiện model v6.1: 1800 augment mục tiêu, đạt hard gate accuracy ≥ 0.92
+- Đánh giá model v7 trên traffic thực (out-of-distribution) thay vì chỉ phân bố tổng hợp
+- Mở rộng phủ các loại tấn công còn thiếu: LDAP/XPath injection, insecure deserialization
 - Cải thiện rate limiting: Sliding Window Counter, Redis-backed distributed
 - Thêm RESPONSE phase inspection (phát hiện data leak, error messages)
 
@@ -596,7 +607,7 @@ docker compose up ml -d      # ML service tại :8000
 ### Phụ lục A — Cấu trúc thư mục dự án
 *(Tree đầy đủ với giải thích từng package)*
 
-### Phụ lục B — Danh sách 36 Rules đầy đủ
+### Phụ lục B — Danh sách 78 Rules đầy đủ
 *(Bảng: ID, category, severity, pattern chính, anomaly score)*
 
 ### Phụ lục C — API Reference
@@ -606,7 +617,6 @@ docker compose up ml -d      # ML service tại :8000
 | Method | Path | Auth | Mô tả |
 |---|---|---|---|
 | POST | `/waf-api/auth/login` | public | Đăng nhập, set HttpOnly cookie |
-| POST | `/waf-api/auth/register` | public | Đăng ký (role bị khóa = viewer) |
 | POST | `/waf-api/auth/logout` | any | Xóa cookie |
 | GET | `/waf-api/auth/me` | any | Thông tin user hiện tại |
 | PUT | `/waf-api/auth/me` | any | Cập nhật email của chính mình |

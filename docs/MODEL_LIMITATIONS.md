@@ -1,70 +1,77 @@
-# Bất lợi của ML model 4-class hiện tại
+# Bất lợi của ML model 10-class hiện tại (v7)
 
-Tài liệu này phân tích **giới hạn** của ML classifier (DistilBERT, 5-class: `normal | sqli | xss | cmdi | path_traversal`) trong project và **chuyện gì xảy ra khi gặp attack ngoài 4 class**.
+Tài liệu này phân tích **giới hạn** của ML classifier (DistilBERT v7, 10-class: `normal | sqli | xss | cmdi | path_traversal | ssrf | xxe | log4shell | ssti | nosqli`) trong project và **chuyện gì xảy ra khi gặp attack ngoài 10 class**.
 
 ---
 
 ## 1. Mô hình hiện tại — recap nhanh
 
-- **Backend**: FastAPI (`ml-service/`) + DistilBERT fine-tuned trên dataset gồm 5 lớp:
+- **Backend**: FastAPI (`ml-service/`) + DistilBERT (base: `distilbert-base-uncased`, `max_length` 256) fine-tuned trên dataset gồm 10 lớp:
   - `normal` (request bình thường)
   - `sqli`
   - `xss`
   - `cmdi` (command injection)
   - `path_traversal`
+  - `ssrf`
+  - `xxe`
+  - `log4shell`
+  - `ssti`
+  - `nosqli`
 - **Inference**: model trả `(label, confidence)` cho 1 chuỗi text (body / args / uri…).
-- **Vai trò trong WAF**: chạy "gray-zone consult" — khi rule score lửng (3 ≤ score < 7), gọi ML để cộng/trừ điểm; ngoài ra rule v2 có thể bật `ml_confirm` để gọi ML xác nhận signature match.
+- **Vai trò trong WAF**: chạy "gray-zone consult" — khi rule score nằm trong dải `[3.0, 5.0)` (tức 3.0 ≤ score < 5.0), gọi ML để cộng/trừ điểm; ngoài ra rule v2 có thể bật `ml_confirm` để gọi ML xác nhận signature match.
 
-→ Model **chỉ phân biệt được 4 loại attack đã train**.
+→ Model **phân biệt được 9 loại attack đã train** (cộng class `normal`).
 
 ---
 
-## 2. Vấn đề: 4 class không đủ phủ OWASP Top 10
+## 2. Vấn đề: 9 class attack vẫn chưa phủ hết OWASP Top 10
 
-OWASP Top 10 (2021) gồm 10 nhóm rủi ro. Model 4-class chỉ trực tiếp cover **3** trong số đó:
+OWASP Top 10 (2021) gồm 10 nhóm rủi ro. Model 10-class (v7) trực tiếp cover phần lớn nhóm thiên về payload:
 
-| OWASP rank | Tên | 4-class model bắt được? |
+| OWASP rank | Tên | 10-class model bắt được? |
 |---|---|---|
-| A01 | Broken Access Control (IDOR, path traversal, file access) | ✓ Path traversal — phần |
+| A01 | Broken Access Control (IDOR, path traversal, file access) | ✓ Path traversal — phần; IDOR/business-logic thì không (không phải payload) |
 | A02 | Cryptographic Failures | ✗ Không phải payload-pattern, model không có dữ liệu |
-| A03 | Injection (SQLi, XSS, command injection, NoSQLi, LDAP, XPath, SSTI, ORM) | ✓ chỉ SQLi/XSS/cmdi — không cover NoSQLi, SSTI, LDAP, XPath |
+| A03 | Injection (SQLi, XSS, command injection, NoSQLi, LDAP, XPath, SSTI, ORM) | ✓ SQLi/XSS/cmdi/NoSQLi/SSTI — **chưa** cover LDAP, XPath, ORM injection |
 | A04 | Insecure Design | ✗ Logic-level, không phải payload |
-| A05 | Security Misconfiguration (XXE, default creds, verbose errors) | ✗ XXE không nằm trong 4 class |
-| A06 | Vulnerable Components (Log4Shell, Spring4Shell) | ✗ Bypass cả 4 class (payload `${jndi:...}` lạ) |
+| A05 | Security Misconfiguration (XXE, default creds, verbose errors) | ✓ XXE đã có class riêng — default creds/verbose error thì không |
+| A06 | Vulnerable Components (Log4Shell, Spring4Shell) | ✓ Log4Shell đã có class `log4shell` — các CVE khác (vd Spring4Shell) vẫn dựa rule |
 | A07 | Identification & Authentication Failures (brute force, credential stuffing) | ✗ Behavioral, không phải single-request payload |
 | A08 | Software/Data Integrity Failures (insecure deserialization) | ✗ Payload base64-ish lạ, không train |
 | A09 | Logging & Monitoring | ✗ — |
-| A10 | SSRF | ✗ Không train |
+| A10 | SSRF | ✓ Đã có class `ssrf` |
 
-→ **Chỉ 2-3 trên 10 nhóm** OWASP được model trực tiếp cover. 7 nhóm còn lại **phải dựa hoàn toàn vào rule signature**.
+→ Với v7, model đã trực tiếp cover phần payload của **A01 (phần), A03 (phần lớn), A05 (XXE), A06 (Log4Shell), A10 (SSRF)**. Các nhóm còn lại — thiên về logic, hành vi, cấu hình hoặc CVE ngoài training — vẫn **phải dựa vào rule signature**.
 
 ---
 
-## 3. Chuyện gì xảy ra khi gặp attack ngoài 4 class
+## 3. Chuyện gì xảy ra khi gặp attack ngoài 9 class attack
+
+Lưu ý: SSRF, XXE, Log4Shell, NoSQLi và SSTI **đã** có class riêng trong v7, nên các kịch bản dưới đây phản ánh **các khoảng trống còn lại** (attack không nằm trong 9 class, hoặc biến thể obfuscate vượt ngoài phân phối training).
 
 ### 3.1. Hiện trạng (failure modes)
 
-**Kịch bản 1: Log4Shell `${jndi:ldap://...}`**
-- Model thấy chuỗi này → train data không có → **classify nhầm thành `normal`** với confidence cao (thường > 0.9).
-- Nếu rule `WAF-035-RCE-LOG4SHELL` không match (vd attacker obfuscate `${${::-j}${::-n}${::-d}${::-i}:...}`) → score = 0 → ALLOW.
-- ML gray-zone không kích hoạt (score = 0, dưới `MinScore` 3) → ML không được gọi.
+**Kịch bản 1: Log4Shell obfuscate nặng `${${::-j}${::-n}${::-d}${::-i}:...}`**
+- v7 có class `log4shell`, bắt tốt dạng chuẩn `${jndi:ldap://...}`.
+- Nhưng với dạng obfuscate lồng nhiều lớp `${...}` rất lạ so với training → ML có thể tụt confidence hoặc classify nhầm thành `normal`.
+- Nếu rule `WAF-035-RCE-LOG4SHELL` cũng không match dạng obfuscate này → score = 0 → ALLOW.
+- ML gray-zone không kích hoạt (score = 0, dưới ngưỡng dưới 3.0 của dải `[3.0, 5.0)`) → ML không được gọi.
 - **Kết quả**: payload đi qua WAF → backend bị tấn công.
 
-**Kịch bản 2: SSRF `http://169.254.169.254/latest/meta-data/`**
-- Rule `WAF-041-SSRF-CLOUD-METADATA` bắt được (signature đặc trưng).
-- Nhưng nếu attacker dùng dạng obfuscate (`http://[::ffff:169.254.169.254]`, `http://2852039166/`, DNS rebinding…) → có thể bypass rule.
-- ML thấy URL "lạ" → classify thành `normal` (vì không phải SQLi/XSS/cmdi/path).
-- **Kết quả**: defense in depth chỉ còn rule.
+**Kịch bản 2: LDAP / XPath injection**
+- v7 cover SQLi/NoSQLi nhưng **không** có class cho LDAP injection (`*)(uid=*))(|(uid=*`) hay XPath injection (`' or '1'='1`).
+- ML thấy payload "lạ" → có thể classify thành `normal` hoặc nhầm sang `sqli`.
+- **Kết quả**: defense in depth cho LDAP/XPath chỉ còn rule signature.
 
-**Kịch bản 3: NoSQL injection `{"$ne": null, "$where": "this.password.length > 0"}`**
-- Rule `WAF-060-NOSQLI-MONGO-OPERATORS` match qua `$where`/`$ne` regex.
-- ML thấy JSON object → có thể classify `normal` (training data có nhiều JSON) hoặc nhầm sang `sqli` (vì có chữ "where").
-- **Hệ quả**: nếu ML nói `normal` confidence cao, `ml_confirm.on_normal_subtract` trừ điểm rule → request có thể được ALLOW dù đã match rule.
+**Kịch bản 3: SSRF obfuscate vượt phân phối**
+- Rule `WAF-041-SSRF-CLOUD-METADATA` + class `ssrf` của v7 bắt tốt dạng `http://169.254.169.254/latest/meta-data/`.
+- Nhưng dạng obfuscate (`http://[::ffff:169.254.169.254]`, `http://2852039166/`, DNS rebinding…) có thể vượt ngoài phân phối training → ML tụt confidence, không cộng điểm.
+- **Kết quả**: defense in depth lại phụ thuộc chủ yếu vào rule.
 
-**Kịch bản 4: XXE / XML bombs / SSTI / deserialization**
-- Cả 4 đều **không có trong training set** → ML hoàn toàn không hiểu.
-- Output: `normal` với confidence ~0.95.
-- → Nếu rule v1 yếu, model **tích cực gây hại** (trừ điểm khi nó nên cộng).
+**Kịch bản 4: Insecure deserialization / business-logic / IDOR**
+- Các attack này **không có trong training set** (deserialization payload base64-ish lạ; IDOR/business-logic là logic-level, không phải pattern payload).
+- Output: thường `normal` với confidence cao.
+- → Nếu rule yếu hoặc không có, model **tích cực gây hại** (trừ điểm khi đáng ra phải cộng).
 
 ### 3.2. Tóm tắt 2 loại failure
 
@@ -75,11 +82,11 @@ OWASP Top 10 (2021) gồm 10 nhóm rủi ro. Model 4-class chỉ trực tiếp c
 
 ---
 
-## 4. Tại sao ML 4-class **vẫn có giá trị** dù hạn chế
+## 4. Tại sao ML 10-class **vẫn có giá trị** dù còn hạn chế
 
-1. **Tăng precision cho 3 class chính**: SQLi và XSS là 60-80% traffic attack thực tế trên web app phổ thông. Cover tốt → giảm FP rule signature đáng kể.
+1. **Tăng precision cho các class chính**: SQLi và XSS là 60-80% traffic attack thực tế trên web app phổ thông; v7 còn cover thêm cmdi/path/ssrf/xxe/log4shell/ssti/nosqli. Cover tốt → giảm FP rule signature đáng kể.
 2. **Confidence-aware**: rule v2 `ml_confirm.min_confidence` giúp **bỏ qua ML khi nó không tự tin** — phần nào hạn chế failure mode #2.
-3. **Train được thêm**: dataset có thể mở rộng → 5-class hôm nay, 8-10 class tương lai.
+3. **Train được thêm**: dataset có thể mở rộng tiếp — v7 đã 10-class, có thể bổ sung thêm các loại injection khác trong tương lai.
 4. **Không phải single point of defense**: rule signature + behavior detector + score model = defense in depth. ML chỉ là 1 lớp.
 
 ---
@@ -90,23 +97,23 @@ OWASP Top 10 (2021) gồm 10 nhóm rủi ro. Model 4-class chỉ trực tiếp c
 
 | Cơ chế | Tác dụng |
 |---|---|
-| **Rule signature 45 rules** (bộ mới) cover SSRF, XXE, NoSQLi, SSTI, log4shell, sensitive paths | Bù trừ ML không biết |
+| **Rule signature 78 rules** (13 nhóm OWASP-aligned) cover SSRF, XXE, NoSQLi, SSTI, log4shell, sensitive paths… | Bù trừ những gì ML không biết |
 | **`ml_confirm.min_confidence: 0.7-0.8`** | ML không đủ tự tin → bỏ qua, không trừ điểm rule |
 | **`action.block: true` cho CVE virtual patch** | Skip score model + ML, block dứt khoát |
 | **Behavior detector** | Bắt brute force / scanner — pattern-blind, không cần ML |
 
 ### 5.2. Nên thêm (xếp theo ưu tiên)
 
-**Ưu tiên 1: Mở rộng training set**
+**Ưu tiên 1: Mở rộng training set cho các khoảng trống còn lại của v7**
 
-Thêm class mới cho ML:
-- `ssrf` — payload URL nội bộ, cloud metadata
-- `xxe` — XML với DOCTYPE/ENTITY ngoài
-- `nosqli` — Mongo operators, JSON `$where`
-- `ssti` — `{{...}}`, `${T(...)}`, `__class__`
-- `log4j` — `${jndi:...}`
+v7 đã cover ssrf/xxe/nosqli/ssti/log4shell. Các class còn thiếu nên bổ sung:
+- `ldap_injection` — `*)(uid=*))(|(uid=*`, filter LDAP
+- `xpath_injection` — `' or '1'='1`, `count(/*)`
+- `deserialization` — payload Java/PHP/Python serialized (base64-ish, magic bytes)
 
 Dataset: scrape từ PortSwigger labs, HackTricks, OWASP CRS test corpus.
+
+Ngoài payload, các khoảng trống không thuộc dạng single-request payload (IDOR/business-logic, brute force/credential stuffing, evasion/obfuscation) cần hướng tiếp cận khác — xem các ưu tiên dưới.
 
 **Ưu tiên 2: Anomaly-detection model song song**
 
@@ -123,7 +130,7 @@ Khi ML confidence thấp (< 0.5 cho mọi class), engine **không** trừ điể
 
 **Ưu tiên 4: Multi-model ensemble**
 
-- DistilBERT (signature-aware) cho SQLi/XSS/cmdi/path
+- DistilBERT v7 (signature-aware) cho 9 class injection đã train
 - Char-level CNN (anomaly) cho mọi text
 - Score = trọng số ensemble
 
@@ -141,21 +148,21 @@ Quá phức tạp cho thesis nhưng là hướng production.
 
 | Giai đoạn | Việc | Hiệu quả |
 |---|---|---|
-| **Tuần 1** | Mở rộng dataset thêm 4 class (ssrf, xxe, nosqli, log4j) | Cover thêm 4/10 OWASP |
-| **Tuần 2** | Re-train DistilBERT 9-class | FN giảm cho các class mới |
-| **Tuần 3** | Thêm anomaly autoencoder, expose qua endpoint thứ 2 | Bắt được attack lạ |
-| **Tuần 4** | Engine v2 mở rộng pattern type `ml_anomaly_gt` | Rule có thể dùng anomaly score |
-| **Tuần 5+** | Threat intel feed integration | Block known-bad IPs/payloads |
+| **Đã xong (v7)** | DistilBERT 10-class (đã bao gồm ssrf, xxe, nosqli, log4shell, ssti) | Cover thêm A05/A06/A10 + NoSQLi/SSTI |
+| **Tuần 1** | Mở rộng dataset cho khoảng trống còn lại (ldap/xpath injection, deserialization) | FN giảm cho các loại injection chưa train |
+| **Tuần 2** | Thêm anomaly autoencoder, expose qua endpoint thứ 2 | Bắt được attack lạ / evasion-obfuscation |
+| **Tuần 3** | Engine v2 mở rộng pattern type `ml_anomaly_gt` | Rule có thể dùng anomaly score |
+| **Tuần 4+** | Threat intel feed integration | Block known-bad IPs/payloads |
 
 ---
 
 ## 7. Kết luận
 
-ML 4-class **không phải là silver bullet**. Nó tốt cho **3/10 OWASP** và rất tốt cho việc **giảm FP** trên các class đã biết. Ngoài phạm vi đó:
+ML 10-class (v7) **không phải là silver bullet**. Nó cover phần payload của nhiều nhóm OWASP (A01 phần, A03 phần lớn, A05 XXE, A06 Log4Shell, A10 SSRF) và rất tốt cho việc **giảm FP** trên các class đã biết — đạt accuracy 0.9968 và macro-F1 0.9959 trên tập test **cùng phân phối training (in-distribution, dữ liệu synthetic)**, không phải bảo chứng cho khả năng tổng quát hóa với traffic thật. Ngoài phạm vi đó:
 
 1. Model **failed silently** (predict `normal` với confidence cao).
 2. Trong tình huống xấu, model **chủ động làm yếu WAF** bằng cách trừ điểm rule signature.
-3. **Rule signature là tuyến phòng thủ chính** cho các class ngoài training.
+3. **Rule signature là tuyến phòng thủ chính** cho các class ngoài training (LDAP/XPath injection, deserialization, IDOR/business-logic, brute force, evasion/obfuscation).
 4. **Mở rộng training set + anomaly model** là path nâng cấp rõ ràng.
 
-→ **Đề xuất cho thesis**: trình bày ML như "thành phần hỗ trợ giảm FP cho 3 class chính" thay vì "phát hiện tấn công đa năng". Defense in depth chính = rule v2 mới (45 rules cover OWASP Top 10 rộng hơn 36 rule v1) + behavior detector + decision engine score model.
+→ **Đề xuất cho thesis**: trình bày ML như "thành phần hỗ trợ giảm FP cho các class đã biết" thay vì "phát hiện tấn công đa năng". Defense in depth chính = rule signature (78 rules / 13 nhóm OWASP-aligned, schema v2) + behavior detector + decision engine score model.

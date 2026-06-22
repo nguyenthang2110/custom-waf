@@ -56,6 +56,8 @@ type ConfigPersister interface {
 type WAFMiddlewareInterface interface {
 	GetBackend() string
 	UpdateBackend(url string) error
+	GetMLSettings() (enabled bool, attackBump, normalPenalty, confidence float64)
+	SetMLSettings(enabled bool, attackBump, normalPenalty, confidence float64)
 }
 
 // NewAPIServer creates a new API server
@@ -96,8 +98,11 @@ func (s *APIServer) SetNotifier(n *notifier.Notifier) {
 
 // RegisterRoutes registers all API routes
 func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
-	// Public auth endpoints (login + register)
-	mux.HandleFunc("/waf-api/auth/register", s.handleRegister)
+	// Public auth endpoints (login only).
+	// NOTE: there is intentionally NO public registration endpoint. New
+	// accounts are created exclusively by an admin via POST
+	// /waf-api/auth/users. The first admin is seeded by migration
+	// (admin/admin) and must change its password immediately.
 	mux.HandleFunc("/waf-api/auth/login", s.handleLogin)
 	mux.HandleFunc("/waf-api/auth/logout", s.handleLogout)
 
@@ -119,10 +124,18 @@ func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/waf-api/stats", s.handleStats)
 	mux.HandleFunc("/waf-api/stats/overview", s.handleStatsOverview)
 
-	// Logs endpoints — read public, clear is admin-only
+	// Access-log endpoints (per-request traffic + WAF verdict) —
+	// read public, clear is admin-only.
 	mux.HandleFunc("/waf-api/logs", s.handleLogs)
 	mux.HandleFunc("/waf-api/logs/recent", s.handleRecentLogs)
 	mux.HandleFunc("/waf-api/logs/clear", s.requireAdmin(s.handleClearLogs))
+
+	// Audit-log endpoints (admin / security events: login, user CRUD,
+	// config changes, rule uploads). Read is admin-only — this is an
+	// accountability trail, not public traffic data.
+	mux.HandleFunc("/waf-api/audit", s.requireAdmin(s.handleAuditEvents))
+	mux.HandleFunc("/waf-api/audit/recent", s.requireAdmin(s.handleRecentAuditEvents))
+	mux.HandleFunc("/waf-api/audit/clear", s.requireAdmin(s.handleClearAuditEvents))
 
 	// IP endpoints — read public, unblock is admin-only
 	mux.HandleFunc("/waf-api/ips", s.handleIPs)
@@ -149,6 +162,9 @@ func (s *APIServer) RegisterRoutes(mux *http.ServeMux) {
 
 	// WAF configuration — write is admin-only
 	mux.HandleFunc("/waf-api/config", s.requireAdminForWrite(s.handleConfig))
+
+	// ML inference gray-zone configuration — write is admin-only
+	mux.HandleFunc("/waf-api/ml/config", s.requireAdminForWrite(s.handleMLConfig))
 
 	// Alerts (Slack/Email/Webhook) — read public, mutate + test are admin-only.
 	mux.HandleFunc("/waf-api/alerts/config", s.requireAdminForWrite(s.handleAlertsConfig))
@@ -386,11 +402,11 @@ func userFromContext(r *http.Request) (*authContext, bool) {
 // ============================================================================
 
 type StatsResponse struct {
-	TotalRequests   int64            `json:"total_requests"`
-	TotalBlocked    int64            `json:"total_blocked"`
-	TotalAllowed    int64            `json:"total_allowed"`
-	TotalChallenged int64            `json:"total_challenged"`
-	BlockRate       float64          `json:"block_rate"`
+	TotalRequests  int64            `json:"total_requests"`
+	TotalBlocked   int64            `json:"total_blocked"`
+	TotalAllowed   int64            `json:"total_allowed"`
+	TotalMonitored int64            `json:"total_monitored"`
+	BlockRate      float64          `json:"block_rate"`
 	AvgLatency      string           `json:"avg_latency"`
 	Uptime          string           `json:"uptime"`
 	RulesLoaded     int              `json:"rules_loaded"`
@@ -424,11 +440,11 @@ func (s *APIServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := StatsResponse{
-		TotalRequests:   stats.TotalRequests,
-		TotalBlocked:    stats.TotalBlocked,
-		TotalAllowed:    stats.TotalAllowed,
-		TotalChallenged: stats.TotalChallenged,
-		BlockRate:       s.metricsCollector.GetBlockRate(),
+		TotalRequests:  stats.TotalRequests,
+		TotalBlocked:   stats.TotalBlocked,
+		TotalAllowed:   stats.TotalAllowed,
+		TotalMonitored: stats.TotalMonitored,
+		BlockRate:      s.metricsCollector.GetBlockRate(),
 		AvgLatency:      s.metricsCollector.GetAverageLatency().String(),
 		Uptime:          s.metricsCollector.GetUptime().String(),
 		RulesLoaded:     s.ruleEngine.RuleCount(),
@@ -447,7 +463,7 @@ func (s *APIServer) handleStatsOverview(w http.ResponseWriter, r *http.Request) 
 		"total_requests": stats.TotalRequests,
 		"blocked":        stats.TotalBlocked,
 		"allowed":        stats.TotalAllowed,
-		"challenged":     stats.TotalChallenged,
+		"monitored":      stats.TotalMonitored,
 		"block_rate":     s.metricsCollector.GetBlockRate(),
 	}
 
@@ -640,13 +656,12 @@ func (s *APIServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 		sortOrder = "desc"
 	}
 
-	logMutex.RLock()
-	defer logMutex.RUnlock()
+	accessLogs := GetAccessBuffer()
 
 	// Filter logs
 	filteredLogs := make([]LogEntry, 0)
-	for i := len(logBuffer) - 1; i >= 0; i-- {
-		entry := logBuffer[i]
+	for i := len(accessLogs) - 1; i >= 0; i-- {
+		entry := accessLogs[i]
 
 		// Apply filters
 		if decision != "" && entry.Decision != decision {
@@ -768,18 +783,17 @@ func (s *APIServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *APIServer) handleRecentLogs(w http.ResponseWriter, r *http.Request) {
-	logMutex.RLock()
-	defer logMutex.RUnlock()
+	accessLogs := GetAccessBuffer()
 
 	// Return last 50 logs
 	logs := make([]LogEntry, 0)
-	start := len(logBuffer) - 50
+	start := len(accessLogs) - 50
 	if start < 0 {
 		start = 0
 	}
 
-	for i := len(logBuffer) - 1; i >= start; i-- {
-		entry := logBuffer[i]
+	for i := len(accessLogs) - 1; i >= start; i-- {
+		entry := accessLogs[i]
 
 		ruleMatches := make([]RuleMatchAPI, 0, len(entry.MatchedRules))
 		for _, rule := range entry.MatchedRules {
@@ -824,23 +838,110 @@ func (s *APIServer) handleClearLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clear the log buffer
+	// Clear the access-log buffer
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Printf("Recovered from panic in ClearLogBuffer: %v\n", r)
+			fmt.Printf("Recovered from panic in ClearAccessBuffer: %v\n", r)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 		}
 	}()
 
-	ClearLogBuffer()
-	fmt.Println("Logs cleared successfully")
+	ClearAccessBuffer()
+	fmt.Println("Access logs cleared successfully")
 
-	// Log the action
-	s.auditLogger.LogSystemEvent("LOGS_CLEARED", "Admin cleared all logs from buffer")
+	// Log the action (this itself is an audit event)
+	s.auditLogger.LogSystemEvent("LOGS_CLEARED", "Admin cleared the access-log buffer")
 
 	writeJSON(w, map[string]interface{}{
 		"success": true,
-		"message": "All logs cleared successfully",
+		"message": "Access logs cleared successfully",
+	})
+}
+
+// AuditEventAPI is the dashboard DTO for one audit-log entry — an admin or
+// security event ("who did what, when"), as opposed to a per-request access
+// log row. Kept intentionally small: audit events carry an event type, a
+// human-readable message, an optional severity and the acting client IP.
+type AuditEventAPI struct {
+	Timestamp string `json:"timestamp"`
+	EventID   string `json:"event_id"`
+	EventType string `json:"event_type"`
+	Severity  string `json:"severity,omitempty"`
+	ClientIP  string `json:"client_ip,omitempty"`
+	Message   string `json:"message"`
+}
+
+// auditEntryToAPI projects an audit.AuditEntry (as produced by
+// LogSystemEvent / LogSecurityEvent) into the dashboard DTO.
+func auditEntryToAPI(entry *audit.AuditEntry) AuditEventAPI {
+	eventType, _ := entry.Metadata["event_type"].(string)
+	if eventType == "" {
+		eventType = entry.Decision // "SYSTEM" fallback
+	}
+	severity, _ := entry.Metadata["severity"].(string)
+	return AuditEventAPI{
+		Timestamp: entry.Timestamp.Format(time.RFC3339),
+		EventID:   entry.RequestID,
+		EventType: eventType,
+		Severity:  severity,
+		ClientIP:  entry.ClientIP,
+		Message:   entry.BlockReason,
+	}
+}
+
+// handleAuditEvents returns the audit-log ring (admin/security events),
+// newest first. Optional ?event_type= and ?severity= filters.
+func (s *APIServer) handleAuditEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	eventTypeFilter := r.URL.Query().Get("event_type")
+	severityFilter := strings.ToUpper(r.URL.Query().Get("severity"))
+
+	events := GetAuditBuffer()
+	out := make([]AuditEventAPI, 0, len(events))
+	for i := len(events) - 1; i >= 0; i-- {
+		dto := auditEntryToAPI(events[i])
+		if eventTypeFilter != "" && dto.EventType != eventTypeFilter {
+			continue
+		}
+		if severityFilter != "" && strings.ToUpper(dto.Severity) != severityFilter {
+			continue
+		}
+		out = append(out, dto)
+	}
+	writeJSON(w, map[string]interface{}{
+		"events": out,
+		"count":  len(out),
+	})
+}
+
+// handleRecentAuditEvents returns the last 50 audit events, newest first.
+func (s *APIServer) handleRecentAuditEvents(w http.ResponseWriter, r *http.Request) {
+	events := GetAuditBuffer()
+	out := make([]AuditEventAPI, 0, 50)
+	start := len(events) - 50
+	if start < 0 {
+		start = 0
+	}
+	for i := len(events) - 1; i >= start; i-- {
+		out = append(out, auditEntryToAPI(events[i]))
+	}
+	writeJSON(w, out)
+}
+
+// handleClearAuditEvents empties the audit-log buffer. Admin-only.
+func (s *APIServer) handleClearAuditEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ClearAuditBuffer()
+	s.auditLogger.LogSystemEvent("AUDIT_CLEARED", "Admin cleared the audit-log buffer")
+	writeJSON(w, map[string]interface{}{
+		"success": true,
+		"message": "Audit events cleared successfully",
 	})
 }
 
@@ -1435,9 +1536,8 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 		writeJSON(w, map[string]interface{}{
 			"decision": map[string]interface{}{
-				"block_threshold":     decisionConfig.BlockThreshold,
-				"challenge_threshold": decisionConfig.ChallengeThreshold,
-				"bypass_paths":        s.decisionEngine.GetBypassPaths(),
+				"block_threshold":   decisionConfig.BlockThreshold,
+				"monitor_threshold": decisionConfig.MonitorThreshold,
 			},
 			"rate_limit": map[string]interface{}{
 				"requests_per_min": rateLimitConfig.RequestsPerMin,
@@ -1450,9 +1550,8 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// Update configuration
 		var req struct {
 			Decision struct {
-				BlockThreshold     float64  `json:"block_threshold"`
-				ChallengeThreshold float64  `json:"challenge_threshold"`
-				BypassPaths        []string `json:"bypass_paths"`
+				BlockThreshold   float64 `json:"block_threshold"`
+				MonitorThreshold float64 `json:"monitor_threshold"`
 			} `json:"decision"`
 			RateLimit struct {
 				RequestsPerMin int                              `json:"requests_per_min"`
@@ -1478,17 +1577,17 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if req.Decision.ChallengeThreshold < 0 || req.Decision.ChallengeThreshold > 100 {
+		if req.Decision.MonitorThreshold < 0 || req.Decision.MonitorThreshold > 100 {
 			writeJSON(w, map[string]interface{}{
 				"success": false,
-				"message": "Challenge threshold must be between 0 and 100",
+				"message": "Monitor threshold must be between 0 and 100",
 			})
 			return
 		}
-		if req.Decision.ChallengeThreshold >= req.Decision.BlockThreshold {
+		if req.Decision.MonitorThreshold >= req.Decision.BlockThreshold {
 			writeJSON(w, map[string]interface{}{
 				"success": false,
-				"message": "Challenge threshold must be less than block threshold",
+				"message": "Monitor threshold must be less than block threshold",
 			})
 			return
 		}
@@ -1512,16 +1611,10 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		if req.Decision.BlockThreshold > 0 {
 			decisionConfig.BlockThreshold = req.Decision.BlockThreshold
 		}
-		if req.Decision.ChallengeThreshold > 0 {
-			decisionConfig.ChallengeThreshold = req.Decision.ChallengeThreshold
+		if req.Decision.MonitorThreshold > 0 {
+			decisionConfig.MonitorThreshold = req.Decision.MonitorThreshold
 		}
 		s.decisionEngine.SetConfig(decisionConfig)
-
-		// Replace user-configured bypass prefixes whenever the field is
-		// present in the request — empty array clears the list.
-		if req.Decision.BypassPaths != nil {
-			s.decisionEngine.SetBypassPaths(req.Decision.BypassPaths)
-		}
 
 		// Update rate limiter config
 		rateLimitConfig := s.rateLimiter.GetConfig()
@@ -1538,17 +1631,16 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 		// Log the change
 		s.auditLogger.LogSystemEvent("CONFIG_CHANGE",
-			fmt.Sprintf("Configuration updated - Block: %.1f, Challenge: %.1f, RPM: %d, Burst: %d",
-				req.Decision.BlockThreshold, req.Decision.ChallengeThreshold,
+			fmt.Sprintf("Configuration updated - Block: %.1f, Monitor: %.1f, RPM: %d, Burst: %d",
+				req.Decision.BlockThreshold, req.Decision.MonitorThreshold,
 				req.RateLimit.RequestsPerMin, req.RateLimit.BurstSize))
 
 		// Persist to DB so changes survive a restart. Failure is non-fatal —
 		// the in-memory update has already been applied.
 		if s.configStore != nil {
 			if err := s.configStore.Save("decision", map[string]interface{}{
-				"block_threshold":     decisionConfig.BlockThreshold,
-				"challenge_threshold": decisionConfig.ChallengeThreshold,
-				"bypass_paths":        s.decisionEngine.GetBypassPaths(),
+				"block_threshold":   decisionConfig.BlockThreshold,
+				"monitor_threshold": decisionConfig.MonitorThreshold,
 			}); err != nil {
 				s.auditLogger.LogSystemEvent("CONFIG_PERSIST_ERROR", "decision: "+err.Error())
 			}
@@ -1566,15 +1658,102 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			"message": "Configuration updated successfully",
 			"config": map[string]interface{}{
 				"decision": map[string]interface{}{
-					"block_threshold":     decisionConfig.BlockThreshold,
-					"challenge_threshold": decisionConfig.ChallengeThreshold,
-					"bypass_paths":        s.decisionEngine.GetBypassPaths(),
+					"block_threshold":   decisionConfig.BlockThreshold,
+					"monitor_threshold": decisionConfig.MonitorThreshold,
 				},
 				"rate_limit": map[string]interface{}{
 					"requests_per_min": rateLimitConfig.RequestsPerMin,
 					"burst_size":       rateLimitConfig.BurstSize,
 				},
 			},
+		})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ============================================================================
+// ML Inference Configuration Handlers
+// ============================================================================
+
+// mlConfigDTO is the read/write shape for the ML gray-zone scoring knobs.
+// Mirrors the live fields held by the WAF middleware (see SetMLSettings).
+type mlConfigDTO struct {
+	Enabled             bool    `json:"enabled"`
+	AttackBump          float64 `json:"attack_bump"`
+	NormalPenalty       float64 `json:"normal_penalty"`
+	ConfidenceThreshold float64 `json:"confidence_threshold"`
+}
+
+// handleMLConfig exposes the ML gray-zone configuration. GET returns the live
+// values; POST validates, applies them to the running middleware, and persists
+// to the config store so they survive a restart. Admin-only on write (route).
+func (s *APIServer) handleMLConfig(w http.ResponseWriter, r *http.Request) {
+	if s.wafMiddleware == nil {
+		writeJSON(w, map[string]interface{}{
+			"success": false,
+			"message": "ML configuration unavailable — WAF middleware not wired",
+		})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		enabled, bump, penalty, conf := s.wafMiddleware.GetMLSettings()
+		writeJSON(w, mlConfigDTO{
+			Enabled:             enabled,
+			AttackBump:          bump,
+			NormalPenalty:       penalty,
+			ConfidenceThreshold: conf,
+		})
+
+	case http.MethodPost:
+		var req mlConfigDTO
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, map[string]interface{}{
+				"success": false,
+				"message": "Invalid request format",
+				"error":   err.Error(),
+			})
+			return
+		}
+
+		// Validate the scoring knobs.
+		if req.AttackBump < 0 || req.NormalPenalty < 0 {
+			writeJSON(w, map[string]interface{}{
+				"success": false,
+				"message": "Attack bump and normal penalty must be non-negative",
+			})
+			return
+		}
+		if req.ConfidenceThreshold < 0 || req.ConfidenceThreshold > 1 {
+			writeJSON(w, map[string]interface{}{
+				"success": false,
+				"message": "Confidence threshold must be between 0 and 1",
+			})
+			return
+		}
+
+		// Apply live.
+		s.wafMiddleware.SetMLSettings(
+			req.Enabled, req.AttackBump, req.NormalPenalty, req.ConfidenceThreshold)
+
+		s.auditLogger.LogSystemEvent("CONFIG_CHANGE",
+			fmt.Sprintf("ML config updated - Enabled: %t, Bump: +%.1f, Penalty: -%.1f, MinConf: %.2f",
+				req.Enabled, req.AttackBump, req.NormalPenalty, req.ConfidenceThreshold))
+
+		// Persist so the override survives a restart (best-effort).
+		if s.configStore != nil {
+			if err := s.configStore.Save("ml", req); err != nil {
+				s.auditLogger.LogSystemEvent("CONFIG_PERSIST_ERROR", "ml: "+err.Error())
+			}
+		}
+
+		writeJSON(w, map[string]interface{}{
+			"success": true,
+			"message": "ML configuration updated successfully",
+			"config":  req,
 		})
 
 	default:

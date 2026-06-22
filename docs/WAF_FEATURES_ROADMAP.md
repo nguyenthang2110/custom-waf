@@ -8,20 +8,19 @@ Tài liệu liệt kê **tính năng các WAF khác có** (Cloudflare, AWS WAF, 
 
 | Nhóm | Tính năng | Có |
 |---|---|---|
-| **Detection** | Signature rule (45 rules v2) | ✓ |
-| | ML hybrid (DistilBERT 5-class + gray-zone) | ✓ |
+| **Detection** | Signature rule (78 rules v2, 13 OWASP-aligned categories) | ✓ |
+| | ML hybrid (DistilBERT 10-class + gray-zone) | ✓ |
 | | Behavior detector (brute force, scanner, IP stats) | ✓ |
 | | Score anomaly model (CRS-style) | ✓ |
 | | Per-rule track (counter cross-request) | ✓ |
-| **Decision** | Block / Challenge / Log / Allow | ✓ |
+| **Decision** | Block / Monitor / Allow (hai mức: chặn 403, hoặc chuyển tiếp + gắn nhãn nghi ngờ) | ✓ |
 | | Force block (rule-level `action.block`) | ✓ |
-| | JS Proof-of-Work challenge | ✓ (mới) |
 | | Whitelist / Blacklist IP | ✓ |
 | **Ops** | Hot reload rule | ✓ |
 | | Rule Builder UI + Browse + Edit | ✓ |
 | | Audit log + dashboard | ✓ |
 | | Rate limiting (token bucket) | ✓ |
-| | JWT auth + local-only admin | ✓ |
+| | JWT auth + local-only admin + RBAC (admin/editor/viewer) | ✓ |
 | **Infra** | HTTPS termination | ✓ |
 | | Prometheus metrics | ✓ |
 
@@ -53,13 +52,13 @@ Mỗi mục: **mô tả ngắn** · **WAF nào dùng** · **mức độ phù h�
 
 | Tính năng | Mô tả | Vendor | Mức độ |
 |---|---|---|---|
-| **CAPTCHA challenge (hCaptcha/Turnstile)** | Human verification thay vì PoW | Cloudflare Turnstile (miễn phí) | ⭐⭐⭐⭐ |
+| **CAPTCHA challenge (hCaptcha/Turnstile)** | Human verification cho verdict trung gian | Cloudflare Turnstile (miễn phí) | ⭐⭐⭐⭐ |
 | **Managed challenge** | Smart escalation (cookie → JS → CAPTCHA) | Cloudflare | ⭐⭐⭐ |
 | **Tarpit / slow response** | Cố tình chậm response cho attacker để tốn time | F5, Imperva | ⭐⭐ |
 | **Decoy / honeypot endpoint** | Endpoint giả (/admin/, /wp-login.php) auto-block IP truy cập | Custom | ⭐⭐⭐ |
 | **Custom error page templates** | Branded block page, multi-language | Cloudflare | ⭐⭐⭐ |
-| **Soft block / monitor mode** | Log only, không block — A/B test rule mới | mọi WAF | ⭐⭐⭐⭐ (đã có 1 phần) |
-| **Per-rule decision (block / log / challenge)** | Mỗi rule cấu hình action riêng | AWS WAF, CRS | ⭐⭐⭐ (đã có `action.block/challenge`) |
+| **Soft block / monitor mode** | Log only, không block — A/B test rule mới | mọi WAF | ✓ (đã có: verdict `MONITOR`, mọi request score > 0; `monitor_threshold` mặc định 0, tunable live) |
+| **Per-rule decision (block / log)** | Mỗi rule cấu hình action riêng | AWS WAF, CRS | ⭐⭐⭐ (đã có `action.block`, `action.log`) |
 | **Redirect on block** | 302 đến trang "you've been blocked" với appeal form | Cloudflare | ⭐⭐ |
 
 ### 2.3. Operations & multitenancy
@@ -73,9 +72,9 @@ Mỗi mục: **mô tả ngắn** · **WAF nào dùng** · **mức độ phù h�
 | **Audit log search + alerting** | Search logs, alert qua Slack/email/webhook khi pattern X | Splunk-style, Datadog | ⭐⭐⭐⭐ |
 | **Dashboard với top attackers / top rules** | Visualize threat landscape | Cloudflare Analytics | ⭐⭐ (đã có 1 phần) |
 | **PCI-DSS compliance reporting** | Auto-generate audit report | Imperva, F5 | ⭐ |
-| **Role-based access control (RBAC)** | Admin / Operator / Read-only | mọi enterprise | ⭐⭐⭐ (hiện chỉ admin/user) |
+| **Role-based access control (RBAC)** | Admin / Operator / Read-only | mọi enterprise | ✓ (đã có 3 role: admin/editor/viewer) |
 | **2FA / MFA** | TOTP, hardware key | mọi enterprise | ⭐⭐ |
-| **Audit trail cho config change** | Log mọi rule edit, who/when/diff | Cloudflare, AWS WAF | ⭐⭐⭐⭐ |
+| **Audit trail cho config change** | Log mọi rule edit, who/when/diff | Cloudflare, AWS WAF | ✓ một phần (config change đã log `CONFIG_CHANGE` qua audit log; rule edit/diff chưa) |
 
 ### 2.4. Performance & infra
 
@@ -111,8 +110,8 @@ Mỗi mục: **mô tả ngắn** · **WAF nào dùng** · **mức độ phù h�
 | **Threat intel feed integration** | 2-3 ngày | Cron job pull AbuseIPDB / Spamhaus → blacklist. Auto-update. |
 | **Decoy / honeypot endpoint** | 1 ngày | Endpoint `/admin/` `/wp-login.php` `/phpmyadmin/` → match → auto-blacklist IP 24h. Cực hiệu quả vs scanner. |
 | **Slack/Discord webhook alert** | 1 ngày | Push notification khi `attack:rce` / `attack:log4shell` match. Quick win cho demo. |
-| **Audit trail rule changes** | 1-2 ngày | Log mọi rule edit vào audit table. Quan trọng cho thesis "tính năng quản trị". |
-| **Soft block / monitor mode per-rule** | 0.5 ngày | Thêm `action.mode: "monitor"` — chỉ log không enforce. Cho test rule mới an toàn. |
+| **Audit trail rule changes** | 1-2 ngày | Config change đã log `CONFIG_CHANGE`; bổ sung log mọi rule edit/upload (who/when/diff) vào audit log. Quan trọng cho thesis "tính năng quản trị". |
+| **Soft block / monitor mode per-rule** | 0.5 ngày | Verdict `MONITOR` toàn cục đã có; đây là mức per-rule: thêm `action.mode: "monitor"` — rule cụ thể chỉ log không enforce. Cho test rule mới an toàn. |
 
 ### 🥈 Priority 2 — Medium effort, solid value
 
@@ -121,9 +120,9 @@ Mỗi mục: **mô tả ngắn** · **WAF nào dùng** · **mức độ phù h�
 | **libinjection integration** (Go port `corazawaf/libinjection-go`) | 3-4 ngày | Chính xác hơn SQLi/XSS regex. Giảm FP. |
 | **API schema validation (OpenAPI)** | 5-7 ngày | Cho rule type `schema_violation` đã design ở spec. |
 | **Response inspection (phase 4)** | 5-7 ngày | Detect SQL error / stack trace / PII leak trong response. Cần thêm phase 4 vào engine. |
-| **Anomaly autoencoder model** | 1-2 tuần | Cover attack ngoài 4 class hiện tại. Xem MODEL_LIMITATIONS.md §5.2. |
+| **Anomaly autoencoder model** | 1-2 tuần | Cover attack ngoài 10 class hiện tại (vd LDAP/XPath injection, insecure deserialization, IDOR/business-logic). Xem MODEL_LIMITATIONS.md §5.2. |
 | **Body chunked inspection + size limit** | 3-4 ngày | Hiện đang đọc cả body vào memory. Cần stream + cap. |
-| **Cloudflare Turnstile integration** | 2-3 ngày | Replace JS PoW khi gặp bot dai dẳng. Free, no captcha annoying. |
+| **Cloudflare Turnstile integration** | 2-3 ngày | Thêm tier challenge cho bot dai dẳng (hiện chưa có tier challenge/PoW nào). Free, no captcha annoying. |
 | **Rule simulator** | 1 tuần | Chạy rule mới trên audit log lịch sử → estimate hit rate, FP rate. Rất quan trọng demo. |
 
 ### 🥉 Priority 3 — Nice-to-have
@@ -134,7 +133,7 @@ Mỗi mục: **mô tả ngắn** · **WAF nào dùng** · **mức độ phù h�
 | **MITRE ATT&CK mapping** | 1 tuần | Thêm `mitre_techniques: [...]` vào info rule |
 | **PDF report weekly** | 3-4 ngày | Cron + template HTML → wkhtmltopdf |
 | **2FA cho admin** | 2-3 ngày | TOTP, lưu secret encrypted |
-| **RBAC mở rộng** | 1 tuần | Roles: viewer / operator / admin |
+| **RBAC mở rộng** | 1 tuần | RBAC 3 roles (admin/editor/viewer) ĐÃ CÓ; đây là phần mở rộng thêm role/permission granular (vd operator riêng) |
 | **GraphQL inspection** | 1 tuần | Chỉ cần nếu backend dùng GraphQL |
 | **Slow loris / connection flood mitigation** | 1 tuần | Per-IP connection limit, idle timeout |
 
@@ -162,7 +161,7 @@ Mỗi mục: **mô tả ngắn** · **WAF nào dùng** · **mức độ phù h�
 
 ### B. **Honeypot endpoint + auto-blacklist** (1 ngày, ấn tượng)
 
-- Thêm bypass path `/admin/` `/wp-login/` `/phpmyadmin/` trong rule cấu hình.
+- Thêm rule honeypot match path `/admin/` `/wp-login/` `/phpmyadmin/` (qua rule engine, không phải bypass list — bypass paths là built-in cố định).
 - Khi match → add IP vào blacklist 24h tự động (qua track + state).
 - Rule:
   ```json
@@ -192,8 +191,8 @@ Mỗi mục: **mô tả ngắn** · **WAF nào dùng** · **mức độ phù h�
 Tháng 1:  GeoIP, honeypot, threat intel, webhook alerts, audit trail rule edits
 Tháng 2:  libinjection, body streaming, monitor-only mode, rule simulator
 Tháng 3:  Response inspection, API schema validation, MITRE mapping
-Tháng 4:  Anomaly autoencoder model, ML class mở rộng (ssrf/xxe/log4j)
-Tháng 5:  Cloudflare Turnstile, 2FA, RBAC mở rộng
+Tháng 4:  Anomaly autoencoder model, ML class mở rộng (ssrf/xxe/log4shell/nosqli đã có ở v7 — bổ sung LDAP/XPath injection, insecure deserialization, IDOR)
+Tháng 5:  Cloudflare Turnstile, 2FA (RBAC 3 role đã có)
 Tháng 6:  Redis-backed state, multi-tenant, SIEM forwarder
 ```
 

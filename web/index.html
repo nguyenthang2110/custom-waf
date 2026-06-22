@@ -467,6 +467,7 @@
             constructor() {
                 this.currentTab = 'logs';
                 this.logs = [];
+                this.auditEvents = [];
                 this.logsMetadata = { total: 0, page: 1, per_page: 50, total_pages: 1 };
                 this.logsSortBy = 'timestamp';
                 this.logsSortOrder = 'desc';
@@ -499,6 +500,7 @@
                 this.alertsFilter = '';
                 this.backendURL = 'Loading...';
                 this.wafConfig = null;
+                this.mlConfig = null;          // loaded from /waf-api/ml/config
                 this.refreshInterval = null;
                 this.configSubTab = 'backend';
                 this.accessSubTab = 'whitelist';
@@ -509,6 +511,14 @@
                 this.ipsSort = { by: 'total_requests', order: 'desc' };
                 this.theme = (localStorage.getItem('waf_theme') === 'light') ? 'light' : 'dark';
                 this._seenLogIds = new Set();
+                // Audit Log is admin-only (backend /waf-api/audit* is admin-gated);
+                // the tab is hidden for non-admins so it never 403s in the UI.
+                this.isAdmin = (() => {
+                    try {
+                        const u = JSON.parse(localStorage.getItem('waf_user') || '{}');
+                        return (u.role || '').toLowerCase() === 'admin';
+                    } catch (e) { return false; }
+                })();
                 this.init();
             }
 
@@ -516,6 +526,7 @@
                 await this.loadData();
                 await this.loadBackend();
                 await this.loadWAFConfig();
+                await this.loadMLConfig();
                 this.render();
                 this.startAutoRefresh();
             }
@@ -623,6 +634,13 @@
                         const rData = await rRes.json();
                         this.allRules = rData.rules || [];
                     } catch (_) { /* keep previous */ }
+
+                    // Audit events: only fetch while the operator is on the
+                    // audit tab (admin-only, low-volume) so the 5s auto-refresh
+                    // keeps it live without polling it for everyone.
+                    if (this.currentTab === 'audit') {
+                        await this.loadAuditEvents();
+                    }
                 } catch (error) {
                     console.error('Failed to load data:', error);
                 }
@@ -874,14 +892,16 @@
 
             renderNavigation() {
                 const tabs = [
-                    { id: 'logs',   label: 'Live Logs',     icon: 'M4 6h16M4 12h16M4 18h7' },
+                    { id: 'logs',   label: 'Access Log',    icon: 'M4 6h16M4 12h16M4 18h7' },
+                    { id: 'audit',  label: 'Audit Log',     icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
                     { id: 'ips',    label: 'IP Addresses',  icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
                     { id: 'stats',  label: 'Statistics',    icon: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z' },
                     { id: 'access', label: 'Access Control', icon: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z' },
                     { id: 'rules',  label: 'Rules',         icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2' },
                     { id: 'alerts', label: 'Alerts',        icon: 'M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9' },
                     { id: 'config', label: 'Configuration', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z' }
-                ];
+                // Audit Log tab is admin-only; drop it for non-admins.
+                ].filter(tab => tab.id !== 'audit' || this.isAdmin);
 
                 return `
                     <nav class="max-w-7xl mx-auto px-6 pt-4">
@@ -901,6 +921,8 @@
                 switch (this.currentTab) {
                     case 'logs':
                         return this.renderLogs();
+                    case 'audit':
+                        return this.isAdmin ? this.renderAudit() : this.renderLogs();
                     case 'ips':
                         return this.renderIPs();
                     case 'stats':
@@ -954,7 +976,7 @@
                                     <option value="">All decisions</option>
                                     <option value="ALLOW"     ${this.logsFilters.decision === 'ALLOW'     ? 'selected' : ''}>Allow</option>
                                     <option value="BLOCK"     ${this.logsFilters.decision === 'BLOCK'     ? 'selected' : ''}>Block</option>
-                                    <option value="CHALLENGE" ${this.logsFilters.decision === 'CHALLENGE' ? 'selected' : ''}>Challenge</option>
+                                    <option value="MONITOR"   ${this.logsFilters.decision === 'MONITOR'   ? 'selected' : ''}>Monitor</option>
                                     <option value="SYSTEM"    ${this.logsFilters.decision === 'SYSTEM'    ? 'selected' : ''}>System</option>
                                 </select>
                                 <select onchange="dashboard.logsFilters.method = this.value" class="pill-input md:col-span-2">
@@ -1056,6 +1078,83 @@
                         </div>
                     </div>
                 `;
+            }
+
+            // Audit Log tab — admin / security events ("who did what, when"),
+            // sourced from /waf-api/audit (a separate stream from the access
+            // log). Loaded lazily by switchTab('audit').
+            renderAudit() {
+                const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                const sevBadge = (sev) => {
+                    const s = String(sev || '').toUpperCase();
+                    if (!s) return '<span class="chip">—</span>';
+                    let style = 'background:var(--pill-log-bg); color:var(--pill-log-fg);';
+                    if (s === 'HIGH' || s === 'CRITICAL') style = 'background:var(--pill-block-bg); color:var(--pill-block-fg);';
+                    else if (s === 'MEDIUM') style = 'background:var(--pill-chal-bg); color:var(--pill-chal-fg);';
+                    return `<span class="pill" style="${style}">${esc(s)}</span>`;
+                };
+                const rows = (this.auditEvents || []).map(ev => `
+                    <tr>
+                        <td class="text-xs whitespace-nowrap" style="color: var(--fg-2);">${this.formatTime(ev.timestamp)}</td>
+                        <td><span style="color: var(--pill-log-fg); font-weight:600">${esc(ev.event_type)}</span></td>
+                        <td>${sevBadge(ev.severity)}</td>
+                        <td><span class="chip">${esc(ev.client_ip) || '—'}</span></td>
+                        <td class="font-mono text-xs">${esc(ev.message)}</td>
+                    </tr>`).join('');
+                return `
+                    <div class="max-w-7xl mx-auto px-6 py-6">
+                        <div class="flex items-center justify-between mb-4">
+                            <div>
+                                <h2 class="text-lg font-semibold" style="color:var(--fg-0)">Audit Log</h2>
+                                <p class="text-xs" style="color:var(--fg-2)">Admin &amp; security events — login, user changes, config updates, rule uploads. Separate from the access log.</p>
+                            </div>
+                            <button onclick="dashboard.clearAuditEvents()" class="btn btn-ghost text-xs">Clear</button>
+                        </div>
+                        <div class="glass overflow-hidden">
+                            <div class="overflow-x-auto">
+                                <table class="data-table no-click">
+                                    <thead>
+                                        <tr>
+                                            <th>Time</th>
+                                            <th>Event</th>
+                                            <th>Severity</th>
+                                            <th>Client IP</th>
+                                            <th>Detail</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${(this.auditEvents || []).length === 0 ? `
+                                            <tr data-empty>
+                                                <td colspan="5" class="px-4 py-16 text-center">
+                                                    <div class="inline-flex flex-col items-center gap-3 text-faint">
+                                                        <svg class="w-10 h-10 opacity-40" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                                                        <div class="text-sm">No audit events yet.</div>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        ` : rows}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            async clearAuditEvents() {
+                try {
+                    const r = await authFetch(`${API_BASE}/audit/clear`, { method: 'POST' });
+                    if (r.ok) {
+                        this.auditEvents = [];
+                        await this.loadAuditEvents();
+                        this.render();
+                        showToast('Audit log cleared', 'success');
+                    } else {
+                        showToast('Failed to clear audit log', 'error');
+                    }
+                } catch (_) {
+                    showToast('Failed to clear audit log', 'error');
+                }
             }
 
             // Bucket an ip object into one of the 4 status labels — used by
@@ -1924,7 +2023,7 @@
                         <div class="flex items-center justify-between gap-4 flex-wrap">
                             <div>
                                 <h2 class="text-xl font-bold tracking-tight">Alerts</h2>
-                                <p class="text-xs text-faint mt-0.5">Cảnh báo bảo mật ra Slack / Email / Webhook khi WAF block hoặc challenge</p>
+                                <p class="text-xs text-faint mt-0.5">Cảnh báo bảo mật ra Slack / Email / Webhook khi WAF block request</p>
                             </div>
                             <div class="flex items-center gap-2">
                                 <button onclick="dashboard.alertsSave()" class="btn btn-primary">
@@ -2012,8 +2111,8 @@
                                 <label class="flex items-start gap-2.5 rounded-lg p-3 cursor-pointer" style="background:var(--bg-1); border:1px solid var(--line)">
                                     <input type="checkbox" class="mt-1" ${sendReq ? 'checked' : ''} onchange="dashboard.alertsConfig.send_request_events=this.checked">
                                     <div>
-                                        <div class="text-sm font-medium" style="color:var(--fg-0)">Blocked / challenged requests</div>
-                                        <div class="text-xs text-faint">Request bị <b>BLOCK</b> hoặc <b>CHALLENGE</b> bởi rule engine, ML, hoặc rate-limit. Severity lấy từ rule khớp cao nhất.</div>
+                                        <div class="text-sm font-medium" style="color:var(--fg-0)">Blocked requests</div>
+                                        <div class="text-xs text-faint">Request bị <b>BLOCK</b> bởi rule engine, ML, hoặc rate-limit. Severity lấy từ rule khớp cao nhất.</div>
                                     </div>
                                 </label>
                                 <label class="flex items-start gap-2.5 rounded-lg p-3 cursor-pointer" style="background:var(--bg-1); border:1px solid var(--line)">
@@ -2541,7 +2640,7 @@
             renderConfiguration() {
                 const cfg = this.wafConfig;
                 const block_t  = cfg ? cfg.decision.block_threshold     : 5.0;
-                const chal_t   = cfg ? cfg.decision.challenge_threshold : 4.0;
+                const mon_t    = cfg ? cfg.decision.monitor_threshold   : 3.0;
                 const rpm      = cfg ? cfg.rate_limit.requests_per_min  : 100;
                 const burst    = cfg ? cfg.rate_limit.burst_size         : 20;
                 const epLimits = (cfg && cfg.rate_limit.endpoint_limits) ? cfg.rate_limit.endpoint_limits : {};
@@ -2551,8 +2650,9 @@
 
                 const tabs = [
                     { id: 'backend',    label: 'Backend Server',  icon: 'M5 12h14M12 5l7 7-7 7',                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          meta: '' },
-                    { id: 'detection',  label: 'Detection',       icon: 'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z',                                                                                                                                                                                                  meta: `${block_t.toFixed(1)} / ${chal_t.toFixed(1)}` },
-                    { id: 'ratelimit',  label: 'Rate Limiting',   icon: 'M13 10V3L4 14h7v7l9-11h-7z',                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       meta: `${rpm} rpm` }
+                    { id: 'detection',  label: 'Detection',       icon: 'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z',                                                                                                                                                                                                  meta: `${block_t.toFixed(1)} / ${mon_t.toFixed(1)}` },
+                    { id: 'ratelimit',  label: 'Rate Limiting',   icon: 'M13 10V3L4 14h7v7l9-11h-7z',                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       meta: `${rpm} rpm` },
+                    { id: 'ml',         label: 'ML Inference',    icon: 'M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z',                                                                                                                                                                                                                                                                                                                                                                                                              meta: this.mlConfig ? (this.mlConfig.enabled ? 'on' : 'off') : '' }
                 ];
 
                 const sidebar = `
@@ -2571,8 +2671,9 @@
 
                 let body = '';
                 switch (sub) {
-                    case 'detection': body = this._renderConfigDetection(block_t, chal_t); break;
+                    case 'detection': body = this._renderConfigDetection(block_t, mon_t); break;
                     case 'ratelimit': body = this._renderConfigRateLimit(rpm, burst, epLimits, epCount); break;
+                    case 'ml':        body = this._renderConfigML(); break;
                     case 'backend':
                     default:          body = this._renderConfigBackend(); break;
                 }
@@ -2624,7 +2725,7 @@
                 `;
             }
 
-            _renderConfigDetection(block_t, chal_t) {
+            _renderConfigDetection(block_t, mon_t) {
                 return `
                     <div class="glass p-6">
                         <div class="section-head">
@@ -2636,8 +2737,8 @@
                         </div>
 
                         <div class="grid grid-cols-2 gap-3 mb-5">
-                            ${this.renderStatCard('Block ≥',     block_t.toFixed(1), 'red')}
-                            ${this.renderStatCard('Challenge ≥', chal_t.toFixed(1),  'amber')}
+                            ${this.renderStatCard('Block ≥',   block_t.toFixed(1), 'red')}
+                            ${this.renderStatCard('Monitor ≥', mon_t.toFixed(1),   'amber')}
                         </div>
 
                         <form onsubmit="dashboard.updateWAFConfig(event)" class="space-y-4">
@@ -2648,8 +2749,8 @@
                                     <p class="text-[11px] text-faint mt-1">Range 0.0 – 100.0</p>
                                 </div>
                                 <div>
-                                    <label class="block text-xs text-muted mb-1.5">Challenge threshold <span class="text-faint">(score ≥ → CHALLENGE)</span></label>
-                                    <input type="number" step="0.1" min="0" max="100" name="challenge_threshold" value="${chal_t}" required class="pill-input w-full">
+                                    <label class="block text-xs text-muted mb-1.5">Monitor threshold <span class="text-faint">(score ≥ → MONITOR)</span></label>
+                                    <input type="number" step="0.1" min="0" max="100" name="monitor_threshold" value="${mon_t}" required class="pill-input w-full">
                                     <p class="text-[11px] text-faint mt-1">Must be less than block threshold</p>
                                 </div>
                             </div>
@@ -2663,7 +2764,61 @@
 
                         <div class="mt-5 rounded-lg p-3 flex items-start gap-2.5" style="background: var(--pill-log-bg); border: 1px solid var(--pill-log-bd);">
                             <svg class="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="color: var(--pill-log-fg);"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                            <p class="text-xs" style="color: var(--fg-1);">Lower the block threshold for stricter protection. The gray zone <span class="font-mono" style="color: var(--accent);">[challenge, block)</span> is where the ML model can override the verdict.</p>
+                            <p class="text-xs" style="color: var(--fg-1);">Lower the block threshold for stricter protection. The gray zone <span class="font-mono" style="color: var(--accent);">[monitor, block)</span> is where the ML model can override the verdict.</p>
+                        </div>
+                    </div>
+                `;
+            }
+
+            _renderConfigML() {
+                const m = this.mlConfig || { enabled: false, attack_bump: 2.0, normal_penalty: 2.0, confidence_threshold: 0.8 };
+                const block_t = this.wafConfig ? this.wafConfig.decision.block_threshold : 5.0;
+                return `
+                    <div class="glass p-6">
+                        <div class="section-head">
+                            <div class="section-icon" style="color: var(--accent);"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg></div>
+                            <div>
+                                <h3 class="text-base font-bold">ML Inference</h3>
+                                <p class="text-xs text-faint">DistilBERT second-opinion for gray-zone requests</p>
+                            </div>
+                        </div>
+
+                        <form onsubmit="dashboard.updateMLConfig(event)" class="space-y-4">
+                            <div class="flex items-center justify-between rounded-lg p-4" style="background: var(--surface); border: 1px solid var(--line);">
+                                <div>
+                                    <div class="text-sm font-semibold" style="color: var(--fg-0);">Enable ML inference</div>
+                                    <p class="text-[11px] text-faint mt-0.5">When off, the WAF decides on the rule score alone.</p>
+                                </div>
+                                <label class="switch-sm">
+                                    <input type="checkbox" name="ml_enabled" ${m.enabled ? 'checked' : ''}>
+                                    <span class="track"></span>
+                                </label>
+                            </div>
+
+                            <div class="grid md:grid-cols-3 gap-3">
+                                <div>
+                                    <label class="block text-xs text-muted mb-1.5">Attack bump <span class="text-faint">(+score)</span></label>
+                                    <input type="number" step="0.1" min="0" max="100" name="attack_bump" value="${m.attack_bump}" required class="pill-input w-full">
+                                </div>
+                                <div>
+                                    <label class="block text-xs text-muted mb-1.5">Normal penalty <span class="text-faint">(−score)</span></label>
+                                    <input type="number" step="0.1" min="0" max="100" name="normal_penalty" value="${m.normal_penalty}" required class="pill-input w-full">
+                                </div>
+                                <div>
+                                    <label class="block text-xs text-muted mb-1.5">Min confidence <span class="text-faint">(0–1)</span></label>
+                                    <input type="number" step="0.01" min="0" max="1" name="confidence_threshold" value="${m.confidence_threshold}" required class="pill-input w-full">
+                                </div>
+                            </div>
+
+                            <button type="submit" class="btn btn-primary">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                Save ML settings
+                            </button>
+                        </form>
+
+                        <div class="mt-5 rounded-lg p-3 flex items-start gap-2.5" style="background: var(--pill-log-bg); border: 1px solid var(--pill-log-bd);">
+                            <svg class="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="color: var(--pill-log-fg);"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            <p class="text-xs" style="color: var(--fg-1);">The ML model is consulted for gray-zone requests (band fixed in <span class="font-mono">config.yaml</span>). A confident attack adds <span class="font-mono" style="color: var(--accent);">+${m.attack_bump}</span> (→ BLOCK at ${block_t.toFixed(1)}); a confident-normal verdict subtracts <span class="font-mono" style="color: var(--accent);">−${m.normal_penalty}</span>. Calls failing or timing out leave the score untouched (fail-open).</p>
                         </div>
                     </div>
                 `;
@@ -2701,7 +2856,7 @@
                                     </div>
                                 </div>
                                 <input type="hidden" name="block_threshold" value="${this.wafConfig ? this.wafConfig.decision.block_threshold : 5.0}">
-                                <input type="hidden" name="challenge_threshold" value="${this.wafConfig ? this.wafConfig.decision.challenge_threshold : 4.0}">
+                                <input type="hidden" name="monitor_threshold" value="${this.wafConfig ? this.wafConfig.decision.monitor_threshold : 3.0}">
                                 <button type="submit" class="btn btn-primary">
                                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
                                     Save defaults
@@ -2779,8 +2934,7 @@
                 const map = {
                     BLOCK:     { cls: 'pill-block', label: 'Block' },
                     ALLOW:     { cls: 'pill-allow', label: 'Allow' },
-                    CHALLENGE: { cls: 'pill-chal',  label: 'Challenge' },
-                    LOG:       { cls: 'pill-log',   label: 'Log' },
+                    MONITOR:   { cls: 'pill-log',   label: 'Monitor' },
                     SYSTEM:    { cls: 'pill-method', label: 'System' }
                 };
                 const m = map[decision];
@@ -2826,9 +2980,29 @@
             }
 
             switchTab(tab) {
+                // Audit Log is admin-only; ignore attempts to reach it otherwise.
+                if (tab === 'audit' && !this.isAdmin) return;
                 this.currentTab = tab;
                 this.uploadNotification = null;
                 this.render();
+                // The audit log is admin-only and low-volume — load it lazily
+                // when the operator actually opens the tab, then re-render.
+                if (tab === 'audit') {
+                    this.loadAuditEvents().then(() => {
+                        if (this.currentTab === 'audit') this.render();
+                    });
+                }
+            }
+
+            async loadAuditEvents() {
+                try {
+                    const res = await authFetch(`${API_BASE}/audit/recent`);
+                    if (!res.ok) { this.auditEvents = []; return; }
+                    this.auditEvents = await res.json() || [];
+                } catch (error) {
+                    console.error('Failed to load audit events:', error);
+                    this.auditEvents = [];
+                }
             }
 
             // Pull TTL value (seconds) from an add-IP form. Returns 0 for
@@ -3311,7 +3485,7 @@
                 const config = {
                     decision: {
                         block_threshold: parseFloat(formData.get('block_threshold')),
-                        challenge_threshold: parseFloat(formData.get('challenge_threshold'))
+                        monitor_threshold: parseFloat(formData.get('monitor_threshold'))
                     },
                     rate_limit: {
                         requests_per_min: parseInt(formData.get('requests_per_min')),
@@ -3321,11 +3495,11 @@
                 };
 
                 // Validate
-                if (config.decision.challenge_threshold >= config.decision.block_threshold) {
+                if (config.decision.monitor_threshold >= config.decision.block_threshold) {
                     this.showPopupNotification(
                         'error',
                         'Invalid Configuration',
-                        'Challenge threshold must be less than block threshold',
+                        'Monitor threshold must be less than block threshold',
                         null
                     );
                     return;
@@ -3345,7 +3519,7 @@
                         this.showPopupNotification(
                             'success',
                             'Configuration Updated!',
-                            `Block: ${config.decision.block_threshold}, Challenge: ${config.decision.challenge_threshold}, RPM: ${config.rate_limit.requests_per_min}`,
+                            `Block: ${config.decision.block_threshold}, Monitor: ${config.decision.monitor_threshold}, RPM: ${config.rate_limit.requests_per_min}`,
                             null
                         );
                         this.render();
@@ -3364,6 +3538,58 @@
                         `Failed to update configuration: ${error.message}`,
                         null
                     );
+                }
+            }
+
+            async loadMLConfig() {
+                try {
+                    const response = await authFetch(`${API_BASE}/ml/config`);
+                    this.mlConfig = await response.json();
+                } catch (error) {
+                    console.error('Failed to load ML config:', error);
+                    this.mlConfig = null;
+                }
+            }
+
+            async updateMLConfig(event) {
+                event.preventDefault();
+                const formData = new FormData(event.target);
+
+                const config = {
+                    enabled:              formData.get('ml_enabled') === 'on',
+                    attack_bump:          parseFloat(formData.get('attack_bump')),
+                    normal_penalty:       parseFloat(formData.get('normal_penalty')),
+                    confidence_threshold: parseFloat(formData.get('confidence_threshold'))
+                };
+
+                // Client-side guard mirroring the server validation.
+                if (config.confidence_threshold < 0 || config.confidence_threshold > 1) {
+                    this.showPopupNotification('error', 'Invalid Configuration',
+                        'Confidence threshold must be between 0 and 1', null);
+                    return;
+                }
+
+                try {
+                    const response = await authFetch(`${API_BASE}/ml/config`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(config)
+                    });
+                    const result = await response.json();
+
+                    if (result.success) {
+                        this.mlConfig = result.config;
+                        this.showPopupNotification('success', 'ML Configuration Updated!',
+                            `${config.enabled ? 'Enabled' : 'Disabled'} · bump +${config.attack_bump} · penalty -${config.normal_penalty} · conf ≥ ${config.confidence_threshold}`,
+                            null);
+                        this.render();
+                    } else {
+                        this.showPopupNotification('error', 'Update Failed',
+                            result.message || 'Failed to update ML configuration', null);
+                    }
+                } catch (error) {
+                    this.showPopupNotification('error', 'Error',
+                        `Failed to update ML configuration: ${error.message}`, null);
                 }
             }
 

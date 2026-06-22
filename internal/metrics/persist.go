@@ -21,7 +21,7 @@ type snapshotV1 struct {
 	StartTime       time.Time              `json:"start_time"`
 	TotalRequests   int64                  `json:"total_requests"`
 	TotalBlocked    int64                  `json:"total_blocked"`
-	TotalChallenged int64                  `json:"total_challenged"`
+	TotalMonitored  int64                  `json:"total_monitored"`
 	TotalAllowed    int64                  `json:"total_allowed"`
 	TotalLatencyNs  int64                  `json:"total_latency_ns"`
 	UniqueClients   int                    `json:"unique_clients"`
@@ -62,7 +62,7 @@ func (c *Collector) Snapshot() ([]byte, error) {
 		StartTime:       c.stats.StartTime,
 		TotalRequests:   c.stats.TotalRequests,
 		TotalBlocked:    c.stats.TotalBlocked,
-		TotalChallenged: c.stats.TotalChallenged,
+		TotalMonitored:  c.stats.TotalMonitored,
 		TotalAllowed:    c.stats.TotalAllowed,
 		TotalLatencyNs:  int64(c.stats.TotalLatency),
 		UniqueClients:   c.stats.UniqueClients,
@@ -103,7 +103,7 @@ func (c *Collector) Restore(data []byte) error {
 	c.stats.StartTime = snap.StartTime
 	c.stats.TotalRequests = snap.TotalRequests
 	c.stats.TotalBlocked = snap.TotalBlocked
-	c.stats.TotalChallenged = snap.TotalChallenged
+	c.stats.TotalMonitored = snap.TotalMonitored
 	c.stats.TotalAllowed = snap.TotalAllowed
 	c.stats.TotalLatency = time.Duration(snap.TotalLatencyNs)
 	c.stats.UniqueClients = snap.UniqueClients

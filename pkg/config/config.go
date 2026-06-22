@@ -19,7 +19,8 @@ type Config struct {
 	Auth      AuthConfig      `yaml:"auth"`
 	Admin     AdminConfig     `yaml:"admin"`
 	TLS       TLSConfig       `yaml:"tls"`
-	Audit     AuditConfig     `yaml:"audit"`
+	AccessLog LogFileConfig   `yaml:"access_log"`
+	AuditLog  LogFileConfig   `yaml:"audit_log"`
 	Training  TrainingConfig  `yaml:"training"`
 	ML        MLConfig        `yaml:"ml"`
 	Alerts    AlertsConfig    `yaml:"alerts"`
@@ -37,12 +38,12 @@ type Config struct {
 // converts it field-for-field in cmd/waf wiring (pkg/config can't import
 // internal/* due to layering).
 type AlertsConfig struct {
-	Enabled         bool                      `yaml:"enabled"`
-	MinSeverity     string                    `yaml:"min_severity"`     // INFO/LOW/MEDIUM/HIGH/CRITICAL
-	ThrottleSeconds int                       `yaml:"throttle_seconds"` // dedup window per (ip, rule_id)
+	Enabled         bool   `yaml:"enabled"`
+	MinSeverity     string `yaml:"min_severity"`     // INFO/LOW/MEDIUM/HIGH/CRITICAL
+	ThrottleSeconds int    `yaml:"throttle_seconds"` // dedup window per (ip, rule_id)
 	// Per-kind toggles — see internal/notifier.Config for the rationale.
 	// SendRequestEvents defaults to true so existing setups keep getting
-	// block/challenge alerts; SendSystemEvents defaults to false so the
+	// block alerts; SendSystemEvents defaults to false so the
 	// dashboard doesn't page someone every time an admin saves a setting.
 	SendRequestEvents bool                      `yaml:"send_request_events"`
 	SendSystemEvents  bool                      `yaml:"send_system_events"`
@@ -116,7 +117,7 @@ type MLConfig struct {
 
 	// Score adjustments applied when ML confidence ≥ ConfidenceThreshold.
 	// AttackBump pushes a borderline request over BlockThreshold; NormalPenalty
-	// pulls it back below ChallengeThreshold. Both are added to / subtracted
+	// pulls it back below it. Both are added to / subtracted
 	// from the rule score before the decision engine runs.
 	AttackBump          float64 `yaml:"attack_bump"`
 	NormalPenalty       float64 `yaml:"normal_penalty"`
@@ -171,11 +172,9 @@ type BehaviorConfig struct {
 }
 
 type DecisionConfig struct {
-	BlockThreshold     float64  `yaml:"block_threshold"`
-	ChallengeThreshold float64  `yaml:"challenge_threshold"`
-	EnableWhitelist    bool     `yaml:"enable_whitelist"`
-	EnableBlacklist    bool     `yaml:"enable_blacklist"`
-	BypassPaths        []string `yaml:"bypass_paths"` // path prefixes silently bypassed (in addition to built-in /socket.io/, /ws/, etc.)
+	BlockThreshold  float64 `yaml:"block_threshold"`
+	EnableWhitelist bool    `yaml:"enable_whitelist"`
+	EnableBlacklist bool    `yaml:"enable_blacklist"`
 }
 
 type TLSConfig struct {
@@ -202,7 +201,12 @@ type AuthConfig struct {
 	RequireAuth bool   `yaml:"require_auth"`
 }
 
-type AuditConfig struct {
+// LogFileConfig configures a single rotating log-file destination. Used
+// for both the access log (every HTTP request + WAF verdict) and the
+// audit log (admin / security events). They are deliberately separate
+// streams: the access log is a high-volume traffic record, the audit log
+// is a low-volume accountability trail.
+type LogFileConfig struct {
 	LogPath string `yaml:"log_path"`
 }
 

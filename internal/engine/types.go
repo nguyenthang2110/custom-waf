@@ -88,7 +88,6 @@ type RuleAction struct {
 	Labels    []string `json:"labels,omitempty"`
 	Log       bool     `json:"log"`
 	Block     bool     `json:"block,omitempty"`
-	Challenge bool     `json:"challenge,omitempty"`
 
 	MLConfirm *MLConfirm `json:"ml_confirm,omitempty"`
 	Track     *TrackCfg  `json:"track,omitempty"`

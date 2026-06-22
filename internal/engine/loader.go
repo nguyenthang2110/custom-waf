@@ -239,8 +239,6 @@ func parseV1Rule(data []byte) (*Rule, error) {
 			// already accounted via Scoring.AnomalyScore
 		case "BLOCK":
 			r.Action.Block = true
-		case "CHALLENGE":
-			r.Action.Challenge = true
 		}
 	}
 	// Default attack label

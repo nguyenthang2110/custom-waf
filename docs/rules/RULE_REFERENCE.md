@@ -226,7 +226,6 @@ Hành động khi rule match.
   "labels": [],
   "log":    true,
   "block":  false,
-  "challenge": false,
 
   "ml_confirm": { ... },
   "track":      { ... }
@@ -241,7 +240,6 @@ Hành động khi rule match.
 | `labels` | string[] | `[]` | Tag request cho rule sau / decision engine |
 | `log` | bool | `true` | Ghi audit log |
 | `block` | bool | `false` | Force block bất kể tổng score |
-| `challenge` | bool | `false` | Gửi CAPTCHA/PoW thay vì block |
 
 ### `action.ml_confirm`
 
@@ -352,9 +350,8 @@ Sau đó engine có thể adjust thêm bằng:
 Tổng score = Σ(score_thật của mọi rule match).
 
 Decision (config global, không phải rule):
-- Tổng ≥ `block_threshold` (default 10) → BLOCK
-- Tổng ≥ `challenge_threshold` (default 5) → CHALLENGE
-- Tổng ≥ `log_threshold` (default 3) → LOG
+- Tổng ≥ `block_threshold` (config.yaml = 5.0) → BLOCK (từ chối, 403)
+- Tổng ≥ `monitor_threshold` (mặc định 0 — "bất kỳ score dương", tức match ≥1 rule; tinh chỉnh live qua `POST /waf-api/config`) → MONITOR (chuyển tiếp + gắn nhãn nghi ngờ)
 - Khác → ALLOW
 
 Một rule có `action.block: true` → force BLOCK bất kể tổng.

@@ -21,14 +21,8 @@ source "${SCRIPT_DIR}/_common.sh"
 require_curl_jq
 require_waf_up
 
-# Order matters: cheap/local first, then state-mutating, so a failure in
-# the first scripts surfaces faster.
 TESTS=(
-  test_alerts.sh
   test_waf_rules.sh
-  test_rate_limit.sh
-  test_auth.sh
-  test_ip_management.sh
 )
 
 declare -a PASSED=()

@@ -1,0 +1,36 @@
+[Unit]
+Description=WAF ML Inference Service (FastAPI + DistilBERT)
+Documentation=file:///opt/waf/docs/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=waf
+Group=waf
+WorkingDirectory=/opt/waf/ml-service
+
+# Point MODEL_DIR at a valid final_model directory on this host.
+# The model is NOT shipped in the repo — copy it onto the server first.
+Environment=MODEL_DIR=/opt/waf/models/final_model_v7
+Environment=MAX_LENGTH=256
+Environment=TRANSFORMERS_OFFLINE=1
+Environment=HF_HUB_OFFLINE=1
+
+# Bind to loopback only — the WAF process is the sole client and lives on
+# the same host. Never expose 8000 to the network.
+ExecStart=/opt/waf/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1
+
+Restart=on-failure
+RestartSec=5
+# DistilBERT load can take 30–60s on first start.
+TimeoutStartSec=120
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
