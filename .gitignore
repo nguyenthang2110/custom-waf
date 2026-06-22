@@ -80,3 +80,7 @@ thesis/
 /waf
 /wafbench
 /wafeval
+
+# Thesis archive (large, not part of runtime)
+/thesis_overleaf.zip
+*.zip
