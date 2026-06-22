@@ -75,3 +75,8 @@ thesis/
 # Editor/OS & tool junk
 .DS_Store
 .codegraph/
+
+# Compiled Go binaries at repo root
+/waf
+/wafbench
+/wafeval
