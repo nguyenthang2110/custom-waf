@@ -18,7 +18,6 @@ type Config struct {
 	Database  DatabaseConfig  `yaml:"database"`
 	Auth      AuthConfig      `yaml:"auth"`
 	Admin     AdminConfig     `yaml:"admin"`
-	TLS       TLSConfig       `yaml:"tls"`
 	AccessLog LogFileConfig   `yaml:"access_log"`
 	AuditLog  LogFileConfig   `yaml:"audit_log"`
 	Training  TrainingConfig  `yaml:"training"`
@@ -92,12 +91,25 @@ type AlertWebhookDestination struct {
 // /waf-api/* return 404 (not 403) for requests from anywhere outside
 // AllowedCIDRs — outsiders can't even discover the admin UI exists.
 //
+// When the WAF sits behind a local reverse proxy / tunnel (e.g. cloudflared),
+// the direct TCP peer is the proxy (127.0.0.1), so gating on RemoteAddr alone
+// would let ANY outsider through the tunnel reach admin surfaces. TrustedProxies
+// + RealIPHeader fix this: when the peer is a trusted proxy, the real client IP
+// is taken from RealIPHeader (Cloudflare's CF-Connecting-IP is forge-proof
+// because the edge overwrites it) and THAT is matched against AllowedCIDRs.
+// The header is only honoured when the peer is trusted, so a direct attacker
+// can't spoof it.
+//
 // Defaults (when section omitted from YAML):
-//   - LocalOnly:    true
-//   - AllowedCIDRs: ["127.0.0.0/8", "::1/128"]  // loopback only
+//   - LocalOnly:      true
+//   - AllowedCIDRs:   ["127.0.0.0/8", "::1/128"]  // loopback only
+//   - TrustedProxies: ["127.0.0.0/8", "::1/128"]  // local proxy/tunnel
+//   - RealIPHeader:   "CF-Connecting-IP"
 type AdminConfig struct {
-	LocalOnly    bool     `yaml:"local_only"`
-	AllowedCIDRs []string `yaml:"allowed_cidrs"`
+	LocalOnly      bool     `yaml:"local_only"`
+	AllowedCIDRs   []string `yaml:"allowed_cidrs"`
+	TrustedProxies []string `yaml:"trusted_proxies"`
+	RealIPHeader   string   `yaml:"real_ip_header"`
 }
 
 // MLConfig configures the bridge to the FastAPI DistilBERT inference service.
@@ -135,7 +147,6 @@ type MLConfig struct {
 
 type ServerConfig struct {
 	Listen       string `yaml:"listen"`
-	HTTPSListen  string `yaml:"https_listen"`
 	ReadTimeout  int    `yaml:"read_timeout"`
 	WriteTimeout int    `yaml:"write_timeout"`
 	IdleTimeout  int    `yaml:"idle_timeout"`
@@ -163,6 +174,7 @@ type LimitConfig struct {
 type BehaviorConfig struct {
 	BruteForceThreshold int           `yaml:"bruteforce_threshold"`
 	BruteForceWindow    time.Duration `yaml:"bruteforce_window"`
+	BlockDuration       time.Duration `yaml:"block_duration"`
 
 	BotDetectionEnabled bool    `yaml:"bot_detection_enabled"`
 	BotScoreThreshold   float64 `yaml:"bot_score_threshold"`
@@ -175,13 +187,6 @@ type DecisionConfig struct {
 	BlockThreshold  float64 `yaml:"block_threshold"`
 	EnableWhitelist bool    `yaml:"enable_whitelist"`
 	EnableBlacklist bool    `yaml:"enable_blacklist"`
-}
-
-type TLSConfig struct {
-	Enabled      bool   `yaml:"enabled"`
-	CertFile     string `yaml:"cert_file"`
-	KeyFile      string `yaml:"key_file"`
-	AutoRedirect bool   `yaml:"auto_redirect"`
 }
 
 type DatabaseConfig struct {
@@ -259,6 +264,15 @@ func Load(path string) (*Config, error) {
 	// disable admin entirely).
 	if cfg.Admin.LocalOnly && len(cfg.Admin.AllowedCIDRs) == 0 {
 		cfg.Admin.AllowedCIDRs = []string{"127.0.0.0/8", "::1/128"}
+	}
+	// Real-IP-behind-proxy defaults. With no trusted proxies the gate falls
+	// back to pure RemoteAddr matching (legacy behaviour); the loopback default
+	// makes a local tunnel/proxy (cloudflared) transparent out of the box.
+	if cfg.Admin.LocalOnly && len(cfg.Admin.TrustedProxies) == 0 {
+		cfg.Admin.TrustedProxies = []string{"127.0.0.0/8", "::1/128"}
+	}
+	if cfg.Admin.RealIPHeader == "" {
+		cfg.Admin.RealIPHeader = "CF-Connecting-IP"
 	}
 
 	// Alert defaults — fill blanks left by user YAML.

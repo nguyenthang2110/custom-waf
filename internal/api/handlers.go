@@ -1192,7 +1192,12 @@ func (s *APIServer) handleUnblockIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Clear BOTH layers: the behaviour detector's temporary ban AND the
+	// access-control blacklist that an auto-ban now promotes the IP into
+	// (see middleware.promoteBanToBlacklist). Removing only the former would
+	// leave the IP blacklisted and still blocked despite the "unblock".
 	s.behaviorDetector.UnblockIP(req.IP)
+	s.decisionEngine.RemoveBlacklistIP(req.IP)
 
 	writeJSON(w, map[string]string{
 		"status":  "success",
@@ -1533,6 +1538,7 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// Get current configuration
 		decisionConfig := s.decisionEngine.GetConfig()
 		rateLimitConfig := s.rateLimiter.GetConfig()
+		behaviorConfig := s.behaviorDetector.GetConfig()
 
 		writeJSON(w, map[string]interface{}{
 			"decision": map[string]interface{}{
@@ -1543,6 +1549,11 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				"requests_per_min": rateLimitConfig.RequestsPerMin,
 				"burst_size":       rateLimitConfig.BurstSize,
 				"endpoint_limits":  rateLimitConfig.EndpointLimits,
+			},
+			"behavior": map[string]interface{}{
+				"bruteforce_threshold":  behaviorConfig.BruteForceThreshold,
+				"bruteforce_window_sec": int(behaviorConfig.BruteForceWindow.Seconds()),
+				"block_duration_sec":    int(behaviorConfig.BlockDuration.Seconds()),
 			},
 		})
 
@@ -1558,6 +1569,11 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				BurstSize      int                              `json:"burst_size"`
 				EndpointLimits map[string]ratelimit.LimitConfig `json:"endpoint_limits"`
 			} `json:"rate_limit"`
+			Behavior struct {
+				BruteForceThreshold int `json:"bruteforce_threshold"`
+				BruteForceWindowSec int `json:"bruteforce_window_sec"`
+				BlockDurationSec    int `json:"block_duration_sec"`
+			} `json:"behavior"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1605,6 +1621,32 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		// Behavior knobs are optional on a given save (only the behavior tab
+		// submits them); validate only the fields that were actually provided.
+		if req.Behavior.BruteForceThreshold != 0 &&
+			(req.Behavior.BruteForceThreshold < 1 || req.Behavior.BruteForceThreshold > 1000) {
+			writeJSON(w, map[string]interface{}{
+				"success": false,
+				"message": "Bruteforce threshold must be between 1 and 1000",
+			})
+			return
+		}
+		if req.Behavior.BruteForceWindowSec != 0 &&
+			(req.Behavior.BruteForceWindowSec < 5 || req.Behavior.BruteForceWindowSec > 86400) {
+			writeJSON(w, map[string]interface{}{
+				"success": false,
+				"message": "Bruteforce window must be between 5s and 86400s (24h)",
+			})
+			return
+		}
+		if req.Behavior.BlockDurationSec != 0 &&
+			(req.Behavior.BlockDurationSec < 5 || req.Behavior.BlockDurationSec > 604800) {
+			writeJSON(w, map[string]interface{}{
+				"success": false,
+				"message": "Block duration must be between 5s and 604800s (7d)",
+			})
+			return
+		}
 
 		// Update decision engine config
 		decisionConfig := s.decisionEngine.GetConfig()
@@ -1629,11 +1671,33 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		s.rateLimiter.SetConfig(rateLimitConfig)
 
+		// Update behavior detector config (bruteforce / auto-ban knobs).
+		behaviorConfig := s.behaviorDetector.GetConfig()
+		behaviorChanged := false
+		if req.Behavior.BruteForceThreshold > 0 {
+			behaviorConfig.BruteForceThreshold = req.Behavior.BruteForceThreshold
+			behaviorChanged = true
+		}
+		if req.Behavior.BruteForceWindowSec > 0 {
+			behaviorConfig.BruteForceWindow = time.Duration(req.Behavior.BruteForceWindowSec) * time.Second
+			behaviorChanged = true
+		}
+		if req.Behavior.BlockDurationSec > 0 {
+			behaviorConfig.BlockDuration = time.Duration(req.Behavior.BlockDurationSec) * time.Second
+			behaviorChanged = true
+		}
+		if behaviorChanged {
+			s.behaviorDetector.SetConfig(behaviorConfig)
+		}
+
 		// Log the change
 		s.auditLogger.LogSystemEvent("CONFIG_CHANGE",
-			fmt.Sprintf("Configuration updated - Block: %.1f, Monitor: %.1f, RPM: %d, Burst: %d",
+			fmt.Sprintf("Configuration updated - Block: %.1f, Monitor: %.1f, RPM: %d, Burst: %d, BF-Threshold: %d, BF-Window: %ds, Ban: %ds",
 				req.Decision.BlockThreshold, req.Decision.MonitorThreshold,
-				req.RateLimit.RequestsPerMin, req.RateLimit.BurstSize))
+				req.RateLimit.RequestsPerMin, req.RateLimit.BurstSize,
+				behaviorConfig.BruteForceThreshold,
+				int(behaviorConfig.BruteForceWindow.Seconds()),
+				int(behaviorConfig.BlockDuration.Seconds())))
 
 		// Persist to DB so changes survive a restart. Failure is non-fatal —
 		// the in-memory update has already been applied.
@@ -1651,6 +1715,15 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 			}); err != nil {
 				s.auditLogger.LogSystemEvent("CONFIG_PERSIST_ERROR", "rate_limit: "+err.Error())
 			}
+			if behaviorChanged {
+				if err := s.configStore.Save("behavior", map[string]interface{}{
+					"bruteforce_threshold":  behaviorConfig.BruteForceThreshold,
+					"bruteforce_window_sec": int(behaviorConfig.BruteForceWindow.Seconds()),
+					"block_duration_sec":    int(behaviorConfig.BlockDuration.Seconds()),
+				}); err != nil {
+					s.auditLogger.LogSystemEvent("CONFIG_PERSIST_ERROR", "behavior: "+err.Error())
+				}
+			}
 		}
 
 		writeJSON(w, map[string]interface{}{
@@ -1664,6 +1737,11 @@ func (s *APIServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 				"rate_limit": map[string]interface{}{
 					"requests_per_min": rateLimitConfig.RequestsPerMin,
 					"burst_size":       rateLimitConfig.BurstSize,
+				},
+				"behavior": map[string]interface{}{
+					"bruteforce_threshold":  behaviorConfig.BruteForceThreshold,
+					"bruteforce_window_sec": int(behaviorConfig.BruteForceWindow.Seconds()),
+					"block_duration_sec":    int(behaviorConfig.BlockDuration.Seconds()),
 				},
 			},
 		})

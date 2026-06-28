@@ -43,21 +43,23 @@ import (
 // We parse CIDRs once at startup and keep them in a slice; lookup is O(N)
 // over a tiny list (usually 1-2 entries) so a trie isn't worth it.
 type adminAccessControl struct {
-	enabled bool
-	allowed []*net.IPNet
+	enabled      bool
+	allowed      []*net.IPNet
+	trusted      []*net.IPNet // proxies whose real-IP header we honour
+	realIPHeader string       // e.g. "CF-Connecting-IP"
 }
 
-func newAdminAccessControl(cfg config.AdminConfig) *adminAccessControl {
-	ac := &adminAccessControl{enabled: cfg.LocalOnly}
-	if !ac.enabled {
-		return ac
-	}
-	for _, c := range cfg.AllowedCIDRs {
+// parseCIDRList turns a list of CIDR / bare-IP strings into *net.IPNet,
+// logging and skipping malformed entries. `label` names the config key for
+// the warning message.
+func parseCIDRList(entries []string, label string) []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range entries {
 		// Bare IP → /32 (IPv4) or /128 (IPv6)
 		if !strings.Contains(c, "/") {
 			ip := net.ParseIP(c)
 			if ip == nil {
-				log.Printf("⚠️  admin.allowed_cidrs: skip invalid entry %q", c)
+				log.Printf("⚠️  %s: skip invalid entry %q", label, c)
 				continue
 			}
 			if ip.To4() != nil {
@@ -68,32 +70,71 @@ func newAdminAccessControl(cfg config.AdminConfig) *adminAccessControl {
 		}
 		_, n, err := net.ParseCIDR(c)
 		if err != nil {
-			log.Printf("⚠️  admin.allowed_cidrs: skip %q (%v)", c, err)
+			log.Printf("⚠️  %s: skip %q (%v)", label, c, err)
 			continue
 		}
-		ac.allowed = append(ac.allowed, n)
+		out = append(out, n)
 	}
+	return out
+}
+
+func newAdminAccessControl(cfg config.AdminConfig) *adminAccessControl {
+	ac := &adminAccessControl{enabled: cfg.LocalOnly, realIPHeader: cfg.RealIPHeader}
+	if !ac.enabled {
+		return ac
+	}
+	ac.allowed = parseCIDRList(cfg.AllowedCIDRs, "admin.allowed_cidrs")
+	ac.trusted = parseCIDRList(cfg.TrustedProxies, "admin.trusted_proxies")
 	return ac
+}
+
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// clientIP resolves the IP the gate should judge. Normally that's the direct
+// TCP peer (RemoteAddr). But when the peer is a *trusted proxy* (a local
+// tunnel/reverse proxy) the real client sits behind it, so we read the real
+// IP from realIPHeader instead. The header is honoured ONLY when the peer is
+// trusted — a direct attacker can't forge their way in by setting it.
+func (ac *adminAccessControl) clientIP(r *http.Request) net.IP {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	peer := net.ParseIP(host)
+	if peer == nil {
+		return nil
+	}
+	if ac.realIPHeader != "" && ipInNets(peer, ac.trusted) {
+		if h := r.Header.Get(ac.realIPHeader); h != "" {
+			// CF-Connecting-IP is a single IP; XFF may be a comma list whose
+			// leftmost (as set by Cloudflare) is the originating client.
+			if comma := strings.IndexByte(h, ','); comma >= 0 {
+				h = h[:comma]
+			}
+			if real := net.ParseIP(strings.TrimSpace(h)); real != nil {
+				return real
+			}
+		}
+	}
+	return peer
 }
 
 func (ac *adminAccessControl) check(r *http.Request) bool {
 	if !ac.enabled {
 		return true
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := net.ParseIP(host)
+	ip := ac.clientIP(r)
 	if ip == nil {
 		return false
 	}
-	for _, n := range ac.allowed {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	return ipInNets(ip, ac.allowed)
 }
 
 // Wrap returns a handler that returns 404 for disallowed clients.
@@ -208,6 +249,7 @@ func main() {
 	behaviorDetector := behavior.NewDetector(behavior.BehaviorConfig{
 		BruteForceThreshold:  cfg.Behavior.BruteForceThreshold,
 		BruteForceWindow:     cfg.Behavior.BruteForceWindow,
+		BlockDuration:        cfg.Behavior.BlockDuration,
 		BotDetectionEnabled:  cfg.Behavior.BotDetectionEnabled,
 		BotScoreThreshold:    cfg.Behavior.BotScoreThreshold,
 		VelocityEnabled:      cfg.Behavior.VelocityEnabled,
@@ -506,7 +548,7 @@ func main() {
 		if err := store.Migrate(); err != nil {
 			log.Printf("⚠️  Config store migration failed: %v — runtime changes will not persist", err)
 		} else {
-			applied, persistedBackend, err := store.LoadInto(decisionEngine, rateLimiter, wafMiddleware)
+			applied, persistedBackend, err := store.LoadInto(decisionEngine, rateLimiter, behaviorDetector, wafMiddleware)
 			switch {
 			case err != nil:
 				log.Printf("⚠️  Failed to load persisted config: %v", err)
@@ -577,7 +619,8 @@ func main() {
 	// flip in configs/config.yaml if you need to admin from another box.
 	adminAC := newAdminAccessControl(cfg.Admin)
 	if adminAC.enabled {
-		log.Printf("✓ Admin access control: local-only (%v)", cfg.Admin.AllowedCIDRs)
+		log.Printf("✓ Admin access control: local-only (allow=%v, trusted_proxies=%v, real_ip_header=%q)",
+			cfg.Admin.AllowedCIDRs, cfg.Admin.TrustedProxies, cfg.Admin.RealIPHeader)
 	} else {
 		log.Println("⚠️  Admin access control: DISABLED (admin endpoints exposed to anyone)")
 	}
@@ -642,91 +685,38 @@ func main() {
 	mux.Handle("/", wafMiddleware)
 	log.Println("✓ WAF proxy: / (all traffic)")
 
-	// Prepare for graceful shutdown
-	var httpServer, httpsServer *http.Server
-	serverErrors := make(chan error, 2)
+	// Prepare for graceful shutdown. TLS is intentionally NOT terminated here:
+	// the WAF speaks plain HTTP and a fronting layer (Cloudflare, nginx, Caddy…)
+	// terminates TLS, then forwards the real scheme via X-Forwarded-Proto. This
+	// keeps cert/key management out of the WAF — the same separation of concerns
+	// Coraza uses (the engine inspects, the proxy host owns TLS).
+	serverErrors := make(chan error, 1)
 
-	// Check if TLS is enabled
-	if cfg.TLS.Enabled {
-		// Create HTTPS server
-		httpsServer = &http.Server{
-			Addr:         cfg.Server.HTTPSListen,
-			Handler:      mux,
-			ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
-			WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
-			IdleTimeout:  time.Duration(cfg.Server.IdleTimeout) * time.Second,
-		}
-
-		// Start HTTPS server
-		go func() {
-			log.Println("==========================================")
-			log.Printf("🛡️  HTTPS WAF is now ACTIVE on %s", cfg.Server.HTTPSListen)
-			log.Println("==========================================")
-			log.Printf("Endpoints:")
-			log.Printf("  - Dashboard: https://%s/dashboard", cfg.Server.HTTPSListen)
-			log.Printf("  - Proxy:     https://%s/", cfg.Server.HTTPSListen)
-			log.Printf("  - API:       https://%s/api/*", cfg.Server.HTTPSListen)
-			log.Printf("  - Health:    https://%s/health", cfg.Server.HTTPSListen)
-			log.Printf("  - Metrics:   https://%s/metrics", cfg.Server.HTTPSListen)
-			log.Printf("  - Stats:     https://%s/admin/stats", cfg.Server.HTTPSListen)
-			log.Println("==========================================")
-
-			if err := httpsServer.ListenAndServeTLS(cfg.TLS.CertFile, cfg.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
-				serverErrors <- fmt.Errorf("HTTPS server error: %w", err)
-			}
-		}()
-
-		// If auto-redirect is enabled, start HTTP redirect server
-		if cfg.TLS.AutoRedirect {
-			// Extract port from HTTPS listen address
-			httpsPort := "8443"
-			if parts := strings.Split(cfg.Server.HTTPSListen, ":"); len(parts) == 2 {
-				httpsPort = parts[1]
-			}
-
-			httpServer = &http.Server{
-				Addr:         cfg.Server.Listen,
-				Handler:      middleware.HTTPSRedirect(httpsPort),
-				ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
-				WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
-				IdleTimeout:  time.Duration(cfg.Server.IdleTimeout) * time.Second,
-			}
-
-			go func() {
-				log.Printf("🔀 HTTP redirect server on %s → HTTPS", cfg.Server.Listen)
-				if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					serverErrors <- fmt.Errorf("HTTP redirect server error: %w", err)
-				}
-			}()
-		}
-	} else {
-		// TLS disabled - run HTTP only
-		httpServer = &http.Server{
-			Addr:         cfg.Server.Listen,
-			Handler:      mux,
-			ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
-			WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
-			IdleTimeout:  time.Duration(cfg.Server.IdleTimeout) * time.Second,
-		}
-
-		go func() {
-			log.Println("==========================================")
-			log.Printf("🛡️  WAF is now ACTIVE on %s (HTTP only)", cfg.Server.Listen)
-			log.Println("==========================================")
-			log.Printf("Endpoints:")
-			log.Printf("  - Dashboard: http://%s/dashboard", cfg.Server.Listen)
-			log.Printf("  - Proxy:     http://%s/", cfg.Server.Listen)
-			log.Printf("  - API:       http://%s/api/*", cfg.Server.Listen)
-			log.Printf("  - Health:    http://%s/health", cfg.Server.Listen)
-			log.Printf("  - Metrics:   http://%s/metrics", cfg.Server.Listen)
-			log.Printf("  - Stats:     http://%s/admin/stats", cfg.Server.Listen)
-			log.Println("==========================================")
-
-			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				serverErrors <- fmt.Errorf("HTTP server error: %w", err)
-			}
-		}()
+	httpServer := &http.Server{
+		Addr:         cfg.Server.Listen,
+		Handler:      mux,
+		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
+		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
+		IdleTimeout:  time.Duration(cfg.Server.IdleTimeout) * time.Second,
 	}
+
+	go func() {
+		log.Println("==========================================")
+		log.Printf("🛡️  WAF is now ACTIVE on %s (HTTP — terminate TLS upstream)", cfg.Server.Listen)
+		log.Println("==========================================")
+		log.Printf("Endpoints:")
+		log.Printf("  - Dashboard: http://%s/dashboard", cfg.Server.Listen)
+		log.Printf("  - Proxy:     http://%s/", cfg.Server.Listen)
+		log.Printf("  - API:       http://%s/api/*", cfg.Server.Listen)
+		log.Printf("  - Health:    http://%s/health", cfg.Server.Listen)
+		log.Printf("  - Metrics:   http://%s/metrics", cfg.Server.Listen)
+		log.Printf("  - Stats:     http://%s/admin/stats", cfg.Server.Listen)
+		log.Println("==========================================")
+
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErrors <- fmt.Errorf("HTTP server error: %w", err)
+		}
+	}()
 
 	// Wait for shutdown signal or server error
 	quit := make(chan os.Signal, 1)
@@ -744,18 +734,10 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Shutdown servers
-	if httpsServer != nil {
-		log.Println("Shutting down HTTPS server...")
-		if err := httpsServer.Shutdown(ctx); err != nil {
-			log.Printf("HTTPS server forced to shutdown: %v", err)
-		}
-	}
-	if httpServer != nil {
-		log.Println("Shutting down HTTP server...")
-		if err := httpServer.Shutdown(ctx); err != nil {
-			log.Printf("HTTP server forced to shutdown: %v", err)
-		}
+	// Shutdown server
+	log.Println("Shutting down HTTP server...")
+	if err := httpServer.Shutdown(ctx); err != nil {
+		log.Printf("HTTP server forced to shutdown: %v", err)
 	}
 
 	// Flush in-memory runtime state to DB so brute-force counters,

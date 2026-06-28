@@ -1,6 +1,5 @@
 server:
-  listen: "0.0.0.0:8080"
-  https_listen: "0.0.0.0:8443"
+  listen: "0.0.0.0:8080"   # HTTP only — terminate TLS upstream (Cloudflare/nginx/Caddy)
   read_timeout: 30
   write_timeout: 30
   idle_timeout: 120
@@ -22,8 +21,9 @@ rate_limit:
   endpoint_limits: {}
 
 behavior:
-  bruteforce_threshold: 5
-  bruteforce_window: 300s
+  bruteforce_threshold: 5      # số request bị chặn trong cửa sổ dưới đây để auto-ban IP
+  bruteforce_window: 300s      # cửa sổ đếm (vượt cửa sổ thì bộ đếm reset)
+  block_duration: 10m          # IP bị auto-ban trong bao lâu rồi tự gỡ (vd: 5m, 10m, 1h)
 
   bot_detection_enabled: true
   bot_score_threshold: 0.7
@@ -56,7 +56,7 @@ auth:
   jwt_secret: "6ea7ab691c3664c257b56bc2e106693caf4797e9bd2959ce5e014585b8620d44"
   jwt_expiry: "24h"
   bcrypt_cost: 10
-  require_auth: false  # Set to true to enable authentication
+  require_auth: true   # Enforces JWT + admin/editor/viewer role checks. Set false only for dev.
 
 admin:
   # Network-level isolation for ALL admin surfaces:
@@ -72,11 +72,16 @@ admin:
     # - "10.0.0.0/8"    # add LAN subnet here if you need to admin from another box
     # - "192.168.0.0/16"
 
-tls:
-  enabled: true
-  cert_file: "./configs/certs/cert.pem"
-  key_file: "./configs/certs/key.pem"
-  auto_redirect: true  # Redirect HTTP to HTTPS
+  # When the WAF runs behind a LOCAL reverse proxy / tunnel (cloudflared), the
+  # TCP peer is the proxy (127.0.0.1), so allowed_cidrs alone would let anyone
+  # through the tunnel reach admin. If the peer is a trusted_proxy, the real
+  # client IP is read from real_ip_header and matched against allowed_cidrs
+  # instead. The header is only trusted when the peer is — outsiders can't forge
+  # it. CF-Connecting-IP is set by Cloudflare's edge and cannot be spoofed.
+  trusted_proxies:
+    - "127.0.0.0/8"
+    - "::1/128"
+  real_ip_header: "CF-Connecting-IP"
 
 # Access log — every HTTP request that passes through the WAF, with its
 # verdict (ALLOW/MONITOR/BLOCK), matched rules and anomaly score. This is

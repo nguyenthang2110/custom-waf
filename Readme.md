@@ -23,10 +23,10 @@ Hệ thống WAF hiệu năng cao được xây dựng từ đầu bằng ngôn 
 *   **IP Management**: Quản lý Blacklist/Whitelist động.
 
 ### 🔐 Bảo Mật & Xác Thực (Authentication)
-*   **Secure Auth System**: Hệ thống đăng ký/đăng nhập hoàn chỉnh sử dụng **PostgreSQL**.
+*   **Secure Auth System**: Đăng nhập dựa trên **PostgreSQL**; tài khoản do admin tạo (không có đăng ký công khai).
 *   **JWT Authentication**: Cơ chế xác thực không trạng thái (Stateless), bảo mật cao.
 *   **Password Hashing**: Mật khẩu được mã hóa an toàn với **Bcrypt**.
-*   **Role-based Access Control**: Phân quyền Admin/User.
+*   **Role-based Access Control**: Phân quyền 3 vai trò **admin / editor / viewer**.
 
 ### 📊 Dashboard & Monitoring
 *   **Real-time Dashboard**: Giám sát lưu lượng truy cập và các request bị chặn theo thời gian thực.
@@ -37,7 +37,7 @@ Hệ thống WAF hiệu năng cao được xây dựng từ đầu bằng ngôn 
 ### 🚀 Performance & Infrastructure
 *   **High Performance**: Viết bằng Go (Golang) cho tốc độ xử lý cực nhanh và khả năng chịu tải lớn (Concurrency).
 *   **Dockerized**: Dễ dàng triển khai với Docker và Docker Compose.
-*   **HTTPS Support**: Hỗ trợ TLS/SSL bảo mật đường truyền.
+*   **TLS tách lớp**: WAF chạy HTTP thuần; TLS do lớp phía trước (Cloudflare / nginx / Caddy) terminate — gọn nhẹ, không phải quản lý chứng chỉ trong WAF.
 
 ---
 
@@ -56,7 +56,7 @@ waf-project/
 │   └── models/             # Định nghĩa cấu trúc dữ liệu (User, Log)
 ├── migrations/             # Scripts khởi tạo database
 ├── web/                    # Giao diện Frontend (HTML/CSS/JS)
-├── scripts/                # Scripts tiện ích (Setup DB, Gen Certs, Test)
+├── scripts/                # Scripts tiện ích (Setup DB, Test)
 └── deployments/            # Cấu hình Docker
 ```
 
@@ -67,7 +67,7 @@ waf-project/
 ### Yêu cầu tiên quyết
 *   **Go** 1.21 trở lên
 *   **Docker** & **Docker Compose** (chạy PostgreSQL)
-*   **Python** 3.10+ (chạy ML service)
+*   **Python** 3.10–3.12 (chạy ML service — PyTorch chưa hỗ trợ 3.13/3.14)
 *   **Make** (Linux/macOS, hoặc WSL2/Git Bash trên Windows)
 *   **Model DistilBERT v8** đặt tại `model_v8/final_model_v8/` (không kèm trong repo — xem Bước 1)
 
@@ -99,14 +99,16 @@ make ml-install
 make ml-start MODEL_DIR=/abs/path/to/final_model_v8
 ```
 
-### Bước 5: Chứng chỉ SSL
-Repo đã kèm `configs/certs/cert.pem` & `key.pem`. Tạo lại khi cần:
-```bash
-mkdir -p configs/certs
-openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-  -keyout configs/certs/key.pem -out configs/certs/cert.pem -subj "/CN=localhost"
-chmod 600 configs/certs/key.pem
-```
+### Bước 5: TLS (do lớp ngoài lo)
+WAF **không** tự terminate TLS — nó chạy HTTP thuần trên `:8080`. Việc mã hóa
+đường truyền do lớp phía trước đảm nhiệm, tùy môi trường:
+*   **Dev / localhost**: dùng trực tiếp HTTP, không cần chứng chỉ.
+*   **Public qua Cloudflare Tunnel**: Cloudflare terminate TLS ở edge; chạy
+    `cloudflared tunnel --url http://localhost:8080`. WAF nhận IP thật qua
+    `CF-Connecting-IP` (cấu hình ở `admin.trusted_proxies`).
+*   **Public tự host**: đặt nginx/Caddy trước WAF, cấu hình chứng chỉ
+    (Let's Encrypt) ở đó rồi `proxy_pass` về `http://127.0.0.1:8080`. Nhớ
+    forward `X-Forwarded-Proto` để cookie `Secure` được set đúng.
 
 ### Bước 6: Build & Run
 ```bash
@@ -123,8 +125,8 @@ make down         # dừng cả ML và Postgres
 ### Cổng dịch vụ
 | Dịch vụ | Địa chỉ |
 |---|---|
-| Dashboard (HTTPS) | `https://localhost:8443` |
-| Proxy traffic (HTTP) | `http://localhost:8080` |
+| Dashboard | `http://localhost:8080/dashboard` |
+| Proxy traffic | `http://localhost:8080` |
 | ML service | `http://127.0.0.1:8000` |
 | Backend upstream | `http://127.0.0.1:3000` |
 
@@ -136,7 +138,10 @@ make docker-run
 
 ### Production (không dùng Docker)
 Linux dùng systemd (`deployments/systemd/`), Windows dùng Windows Service
-(`deployments/windows/install-services.ps1`). Chi tiết: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+(`deployments/windows/install-services.ps1`). Đặt một reverse proxy TLS
+(nginx/Caddy/Cloudflare) phía trước, `proxy_pass` về `http://127.0.0.1:8080`,
+forward `X-Forwarded-Proto` + IP thật (`X-Real-IP`/`CF-Connecting-IP`) và khai
+IP proxy vào `admin.trusted_proxies`.
 
 > **Windows:** `make` không chạy trên CMD/PowerShell thuần. Dùng **WSL2** (khuyến nghị)
 > hoặc Git Bash, hoặc chạy thủ công `go build` + `uvicorn` + `docker compose`.
@@ -155,24 +160,26 @@ python3 scripts/test_multi_ips.py
 
 ### 2. Test toàn diện (Comprehensive)
 ```bash
-# Script bash chạy toàn bộ bộ test
+# Chạy toàn bộ bộ test black-box (auto-ban + ML gray-zone)
 ./scripts/test_all.sh
 
-# Hoặc test riêng các luật WAF
-./scripts/test_waf_rules.sh
+# Hoặc chạy riêng từng test (cần .venv có `requests`)
+.venv/bin/python scripts/test_ml_service.py     # thuần model, gửi thẳng :8000
+.venv/bin/python scripts/test_autoban.py        # auto-ban → blacklist
+.venv/bin/python scripts/test_ml_gray_zone.py   # rule không quyết → gọi ML service
 ```
 
 ### 3. Test năng lực chịu tải (Benchmark)
 ```bash
 # Yêu cầu cài đặt 'ab' (Apache Bench)
-ab -n 1000 -c 100 https://localhost:8443/
+ab -n 1000 -c 100 http://localhost:8080/
 ```
 
 ---
 
 ## 👤 Tài khoản Mặc định
 
-*   **Admin Dashboard**: `https://localhost:8443`
+*   **Admin Dashboard**: `http://localhost:8080/dashboard`
 *   **User mặc định**:
     *   Username: `admin`
     *   Password: `admin` (Vui lòng đổi mật khẩu sau khi đăng nhập)
@@ -184,7 +191,8 @@ ab -n 1000 -c 100 https://localhost:8443/
 *   **v1.0**: Initial Release - WAF Core Engine, Basic Rules.
 *   **v1.1**: Added Dashboard & Rate Limiting.
 *   **v1.2**: Integrated PostgreSQL Authentication & JWT.
-*   **v1.3**: Expanded Ruleset (78 rules, 13 categories) & HTTPS Support.
+*   **v1.3**: Expanded Ruleset (78 rules, 13 categories).
+*   **v1.4**: ML gray-zone layer (DistilBERT). Bỏ TLS trong WAF — terminate ở lớp ngoài (giống Coraza). Real-IP admin gate sau proxy, auto-ban → blacklist.
 
 ---
 

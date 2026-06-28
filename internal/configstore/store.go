@@ -10,7 +10,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
+	"waf-project/internal/behavior"
 	"waf-project/internal/decision"
 	"waf-project/internal/ratelimit"
 )
@@ -30,6 +32,7 @@ const (
 	KeyWhitelist = "whitelist_ips"
 	KeyBlacklist = "blacklist_ips"
 	KeyML        = "ml"
+	KeyBehavior  = "behavior"
 )
 
 // Store is the typed wrapper around the waf_runtime_config table.
@@ -92,6 +95,7 @@ func (s *Store) Save(key string, value any) error {
 func (s *Store) LoadInto(
 	de *decision.DecisionEngine,
 	rl *ratelimit.RateLimiter,
+	bd *behavior.Detector,
 	wafBackend BackendUpdater,
 ) (applied int, outBackend string, err error) {
 	if s == nil {
@@ -149,6 +153,31 @@ func (s *Store) LoadInto(
 				cfg.EndpointLimits = r.EndpointLimits
 			}
 			rl.SetConfig(cfg)
+			applied++
+
+		case KeyBehavior:
+			if bd == nil {
+				continue
+			}
+			var b struct {
+				BruteForceThreshold int `json:"bruteforce_threshold"`
+				BruteForceWindowSec int `json:"bruteforce_window_sec"`
+				BlockDurationSec    int `json:"block_duration_sec"`
+			}
+			if err := json.Unmarshal(raw, &b); err != nil {
+				return applied, outBackend, fmt.Errorf("configstore: decode behavior: %w", err)
+			}
+			cfg := bd.GetConfig()
+			if b.BruteForceThreshold > 0 {
+				cfg.BruteForceThreshold = b.BruteForceThreshold
+			}
+			if b.BruteForceWindowSec > 0 {
+				cfg.BruteForceWindow = time.Duration(b.BruteForceWindowSec) * time.Second
+			}
+			if b.BlockDurationSec > 0 {
+				cfg.BlockDuration = time.Duration(b.BlockDurationSec) * time.Second
+			}
+			bd.SetConfig(cfg)
 			applied++
 
 		case KeyML:

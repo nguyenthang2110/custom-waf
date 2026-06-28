@@ -15,19 +15,24 @@ WAF gồm **3 tiến trình** độc lập:
 
 | Thành phần | Công nghệ | Cổng mặc định | Bắt buộc? |
 |---|---|---|---|
-| **WAF reverse proxy** | Go binary (`bin/waf`) | `8080` (HTTP), `8443` (HTTPS) | ✅ Có |
+| **TLS terminator** | Cloudflare / nginx / Caddy | `443` | ✅ Có khi mở ra Internet (WAF không tự terminate TLS) |
+| **WAF reverse proxy** | Go binary (`bin/waf`) | `8080` (HTTP only) | ✅ Có |
 | **PostgreSQL** | Postgres 15 | `5432` | ✅ Có (lưu user/auth, config & state) |
 | **ML inference service** | Python FastAPI + DistilBERT | `8000` (chỉ loopback) | ⚙️ Tùy chọn — tắt bằng `ml.enabled: false` |
 
 Sơ đồ luồng:
 
 ```
-Internet ──▶ [WAF :8443] ──▶ upstream backend (app thật của bạn)
-                │  │
-                │  └─▶ PostgreSQL :5432   (user, runtime config, state)
-                └────▶ ML service :8000   (chỉ gọi khi điểm rule nằm vùng xám)
+Internet ──TLS──▶ [nginx/Caddy/Cloudflare :443] ──HTTP──▶ [WAF :8080] ──▶ upstream backend (app thật của bạn)
+                  (terminate TLS, forward                    │  │
+                   X-Forwarded-Proto + IP thật)              │  └─▶ PostgreSQL :5432  (user, config, state)
+                                                             └────▶ ML service :8000  (chỉ khi điểm rule vùng xám)
 ```
 
+- WAF **chạy HTTP thuần** trên `:8080` — không có cổng HTTPS, không quản lý chứng
+  chỉ. Lớp phía trước terminate TLS rồi forward `X-Forwarded-Proto` (để cookie
+  `Secure` set đúng) và IP thật qua `CF-Connecting-IP`/`X-Real-IP` (khai trong
+  `admin.trusted_proxies`).
 - Dashboard quản trị nằm **nhúng trong binary** (`/dashboard`) — không có file tĩnh
   cần copy riêng.
 - WAF đứng **trước** ứng dụng của bạn. Đặt địa chỉ ứng dụng thật vào
@@ -137,8 +142,7 @@ Sửa các mục bắt buộc cho production:
 
 ```yaml
 server:
-  listen: "0.0.0.0:80"          # hoặc giữ 8080 nếu có LB/Nginx phía trước
-  https_listen: "0.0.0.0:443"
+  listen: "0.0.0.0:8080"        # HTTP only — luôn có Nginx/Caddy/Cloudflare phía trước
 
 upstream:
   url: "http://127.0.0.1:3000"  # ⟵ TRỎ VÀO APP THẬT CỦA BẠN
@@ -156,26 +160,38 @@ admin:
   allowed_cidrs:
     - "127.0.0.1/32"
     - "10.0.0.0/8"              # ⟵ thêm dải IP máy quản trị của bạn
+  trusted_proxies:              # ⟵ IP của lớp TLS phía trước (nginx/cloudflared)
+    - "127.0.0.1/32"
+  real_ip_header: "X-Real-IP"   # nginx; dùng "CF-Connecting-IP" nếu qua Cloudflare
 
 ml:
   enabled: true
   endpoint: "http://127.0.0.1:8000"
 ```
 
-**TLS:** mặc định `tls.enabled: true` và trỏ tới `./configs/certs/cert.pem` +
-`key.pem`. Nếu file chứng chỉ không tồn tại, server HTTPS sẽ lỗi. Hai lựa chọn:
+**TLS — terminate ở lớp ngoài, không phải trong WAF.** Binary chỉ phục vụ HTTP
+trên `:8080`; không còn `tls:` block, không có cổng HTTPS. Đặt một reverse proxy
+TLS phía trước. Ví dụ Nginx:
 
-```bash
-# (a) Tạo cert tự ký để test:
-mkdir -p configs/certs
-openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-  -keyout configs/certs/key.pem -out configs/certs/cert.pem \
-  -subj "/CN=waf.local"
-chmod 600 configs/certs/key.pem
+```nginx
+server {
+    listen 443 ssl;
+    server_name waf.example.com;
+    ssl_certificate     /etc/letsencrypt/live/waf.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/waf.example.com/privkey.pem;
 
-# (b) Hoặc tắt TLS trong binary và để Nginx/LB lo TLS:
-#     đặt tls.enabled: false trong config.yaml
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;   # WAF đọc IP thật từ đây
+        proxy_set_header X-Forwarded-Proto $scheme;        # để cookie Secure set đúng
+    }
+}
 ```
+
+Cấp chứng chỉ bằng `certbot --nginx` (Let's Encrypt). Caddy còn gọn hơn: một
+dòng `reverse_proxy 127.0.0.1:8080` là tự lo cả TLS. Nếu dùng Cloudflare Tunnel
+thì TLS được terminate ở edge, không cần cert trên máy.
 
 ### 3.6. Chạy như systemd service
 
@@ -196,9 +212,9 @@ journalctl -u waf -f
 ### 3.7. Firewall
 
 ```bash
-sudo ufw allow 443/tcp      # HTTPS public
-sudo ufw allow 80/tcp       # HTTP (redirect → HTTPS)
-# KHÔNG mở 8000 (ML) và 5432 (Postgres) ra ngoài — chỉ loopback.
+sudo ufw allow 443/tcp      # HTTPS public (do nginx/Caddy terminate)
+sudo ufw allow 80/tcp       # HTTP (để certbot/redirect ở proxy)
+# KHÔNG mở 8080 (WAF), 8000 (ML), 5432 (Postgres) ra ngoài — chỉ loopback.
 sudo ufw enable
 ```
 
@@ -263,15 +279,10 @@ python -m venv .venv
 Sửa `C:\waf\configs\config.yaml` y như mục **3.5** (jwt_secret, require_auth,
 upstream.url, database.password, admin.allowed_cidrs).
 
-Tạo cert tự ký (cần OpenSSL, hoặc dùng PowerShell `New-SelfSignedCertificate`):
-
-```powershell
-# Cách đơn giản: tắt TLS trong config.yaml (tls.enabled: false) và để IIS/LB lo,
-# hoặc tạo cert bằng OpenSSL nếu đã cài:
-mkdir C:\waf\configs\certs
-openssl req -x509 -newkey rsa:2048 -nodes -days 365 `
-  -keyout C:\waf\configs\certs\key.pem -out C:\waf\configs\certs\cert.pem -subj "/CN=waf.local"
-```
+TLS do lớp ngoài lo — WAF chỉ chạy HTTP `:8080`. Trên Windows đặt **IIS** (với
+URL Rewrite + ARR) hoặc **Caddy** phía trước, terminate TLS rồi reverse-proxy về
+`http://127.0.0.1:8080`, nhớ forward `X-Real-IP` và `X-Forwarded-Proto`. Không
+cần tạo cert cho binary WAF.
 
 ### 4.6. Chạy như Windows Service (NSSM)
 
@@ -297,9 +308,9 @@ nssm remove WAF-ML confirm
 ### 4.7. Firewall
 
 ```powershell
-New-NetFirewallRule -DisplayName "WAF HTTPS" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow
-New-NetFirewallRule -DisplayName "WAF HTTP"  -Direction Inbound -Protocol TCP -LocalPort 80  -Action Allow
-# KHÔNG mở 8000 và 5432 ra ngoài.
+New-NetFirewallRule -DisplayName "TLS proxy" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow
+# KHÔNG mở 8080 (WAF), 8000 (ML), 5432 (Postgres) ra ngoài — chỉ lớp TLS phía trước
+# mới được expose; WAF chỉ nhận từ proxy đó qua loopback.
 ```
 
 ---
@@ -307,8 +318,9 @@ New-NetFirewallRule -DisplayName "WAF HTTP"  -Direction Inbound -Protocol TCP -L
 ## 5. Kiểm tra sau khi deploy (cả hai HĐH)
 
 ```bash
-# 1. Health check (không cần auth)
-curl -k https://<server>/health          # kỳ vọng: 200 OK
+# 1. Health check qua lớp TLS phía trước (không cần auth)
+curl https://<server>/health             # kỳ vọng: 200 OK
+#    hoặc thẳng vào WAF trên server:  curl http://127.0.0.1:8080/health
 
 # 2. ML service sống (chạy trên chính server)
 curl http://127.0.0.1:8000/health        # kỳ vọng: {"status":"ok",...}
@@ -317,7 +329,7 @@ curl http://127.0.0.1:8000/health        # kỳ vọng: {"status":"ok",...}
 #    https://<server>/dashboard  → đăng nhập admin/admin → ĐỔI MẬT KHẨU NGAY
 
 # 4. Thử một request tấn công để xác nhận WAF chặn
-curl -k "https://<server>/?id=1' OR '1'='1"   # kỳ vọng: bị BLOCK (403)
+curl "https://<server>/?id=1' OR '1'='1"      # kỳ vọng: bị BLOCK (403)
 ```
 
 Xem log:
@@ -333,10 +345,10 @@ Xem log:
 - [ ] `auth.jwt_secret` thay bằng chuỗi ngẫu nhiên (`openssl rand -hex 32`).
 - [ ] `database.password` mạnh, khác mặc định `waf_password`.
 - [ ] `admin.allowed_cidrs` chỉ chứa dải IP quản trị (mặc định loopback).
-- [ ] TLS bật với cert hợp lệ (hoặc TLS do LB/Nginx phía trước đảm nhiệm).
-- [ ] Cổng `8000` (ML) và `5432` (Postgres) **không** mở ra ngoài.
+- [ ] `admin.trusted_proxies` + `real_ip_header` khớp lớp TLS phía trước (để gate IP thật, không thể giả mạo).
+- [ ] TLS terminate ở Nginx/Caddy/Cloudflare với cert hợp lệ; proxy forward `X-Forwarded-Proto` + IP thật.
+- [ ] Cổng `8080` (WAF), `8000` (ML), `5432` (Postgres) **không** mở ra ngoài — chỉ lớp TLS được expose.
 - [ ] `upstream.url` trỏ đúng app backend thật.
-- [ ] File `configs/certs/key.pem` quyền `600`, không commit vào git.
 
 ---
 
@@ -390,27 +402,25 @@ Dùng đúng giá trị mặc định `upstream.url: http://127.0.0.1:3000` đã
 
 ```
                           server công khai (VPS / EC2 / VM)
-                 ┌──────────────────────────────────────────────────┐
-  Internet ─────▶│  WAF  :80 → 301 → :443  (Go binary, chạy systemd) │
-   (client thật) │     │                                             │
-                 │     └─▶ upstream  127.0.0.1:3000  (Juice Shop)    │  ← chỉ loopback
-                 │     └─▶ PostgreSQL 127.0.0.1:5432                 │  ← chỉ loopback
-                 │     └─▶ ML service 127.0.0.1:8000 (tùy chọn)      │  ← chỉ loopback
-                 └──────────────────────────────────────────────────┘
-   Admin ─────── SSH tunnel ──▶ 127.0.0.1 trên server ──▶ /dashboard
+                 ┌─────────────────────┐   HTTP   ┌────────────────────────────┐
+  Internet ─TLS─▶│ Nginx/Caddy/CF :443 │ ───────▶ │  WAF :8080  (Go binary)    │
+   (client thật) │ terminate TLS,      │ 127.0.0.1│     │                      │
+                 │ forward IP + scheme │          │     └─▶ upstream :3000     │ ← loopback
+                 └─────────────────────┘          │     └─▶ PostgreSQL :5432    │ ← loopback
+                                                  │     └─▶ ML service :8000    │ ← loopback
+                                                  └────────────────────────────┘
 ```
 
-**Nguyên tắc vàng:** chỉ **WAF** được nghe ra ngoài (`80`/`443`). Backend
-(`3000`), Postgres (`5432`) và ML (`8000`) **chỉ bind loopback** — người ngoài
-bắt buộc phải đi xuyên qua WAF, không có đường vòng.
+**Nguyên tắc vàng:** chỉ **lớp TLS phía trước** được nghe ra ngoài (`:443`).
+WAF (`8080`), backend (`3000`), Postgres (`5432`) và ML (`8000`) **chỉ bind
+loopback** — người ngoài bắt buộc đi xuyên qua proxy → WAF, không có đường vòng.
 
-> ⚠️ **KHÔNG đặt Nginx/HAProxy/LB đứng *trước* WAF trong mô hình này.** Cổng gác
-> admin (`/dashboard`, `/waf-api/*` …) nhận diện client bằng **địa chỉ TCP thật**
-> (`RemoteAddr`), *không* đọc `X-Forwarded-For`. Nếu có proxy phía trước, mọi
-> request sẽ mang IP của proxy (thường `127.0.0.1`) → lọt vào dải loopback mặc
-> định trong `admin.allowed_cidrs` → **toàn bộ Internet xem được trang admin**.
-> Để WAF tự nghe `:443` (mục 9.4) là cách an toàn nhất. Nếu bắt buộc phải có CDN
-> phía trước, xem cảnh báo ở mục 9.7.
+> ✅ **Đặt proxy TLS trước WAF là mô hình chuẩn.** WAF chạy HTTP thuần và lấy IP
+> client thật từ header do proxy đặt (`X-Real-IP` cho nginx, `CF-Connecting-IP`
+> cho Cloudflare). Cổng gác admin chỉ tin header này **khi peer nằm trong
+> `admin.trusted_proxies`** — nên phải khai IP của proxy vào đó (xem 9.3). Nhờ
+> vậy gate admin so trên IP thật, không thể bị giả mạo, và **không lọt admin ra
+> Internet** dù proxy kết nối từ loopback.
 
 ### 9.2. Dựng backend OWASP Juice Shop ở cổng 3000
 
@@ -436,17 +446,10 @@ Sửa `configs/config.yaml` (giả sử cài tại `/opt/waf` theo mục 3):
 
 ```yaml
 server:
-  listen: "0.0.0.0:80"          # nhận HTTP public (sẽ 301 sang HTTPS)
-  https_listen: "0.0.0.0:443"   # nhận HTTPS public
+  listen: "127.0.0.1:8080"      # HTTP only, chỉ nhận từ proxy TLS qua loopback
 
 upstream:
   url: "http://127.0.0.1:3000"  # ← Juice Shop / app của bạn (đã là mặc định)
-
-tls:
-  enabled: true
-  cert_file: "/opt/waf/configs/certs/fullchain.pem"
-  key_file: "/opt/waf/configs/certs/privkey.pem"
-  auto_redirect: true           # 80 → 443
 
 auth:
   require_auth: true
@@ -455,64 +458,44 @@ auth:
 admin:
   local_only: true
   allowed_cidrs:
-    - "127.0.0.0/8"             # giữ loopback → admin qua SSH tunnel (mục 9.5)
-    - "::1/128"
+    - "203.0.113.5/32"          # ← IP máy quản trị THẬT của bạn (không phải loopback)
+  trusted_proxies:
+    - "127.0.0.1/32"            # nginx/Caddy chạy cùng máy
+  real_ip_header: "X-Real-IP"   # "CF-Connecting-IP" nếu đứng sau Cloudflare
 ```
 
-systemd unit `deployments/systemd/waf.service` đã có
-`AmbientCapabilities=CAP_NET_BIND_SERVICE`, nên user `waf` **bind được `:80`/`:443`
-mà không cần chạy root**.
+> Vì proxy đặt IP thật vào `X-Real-IP` và WAF gate trên IP đó, bạn dùng **IP thật
+> của máy quản trị** trong `allowed_cidrs` (không còn dải loopback nữa). Proxy
+> kết nối từ `127.0.0.1` nhưng nó chỉ *chuyển tiếp* IP, không *qua được* gate.
 
-### 9.4. TLS thật bằng Let's Encrypt (có domain)
+### 9.4. TLS bằng Let's Encrypt tại Nginx (có domain)
 
-WAF tự phục vụ TLS từ `cert_file`/`key_file`, nên ta chỉ cần lấy cert rồi trỏ vào.
-Dùng certbot ở chế độ `standalone` (xin/ gia hạn cert) — phải tạm dừng WAF khi xin
-vì certbot cần cổng 80:
+TLS terminate ở **nginx**, không phải WAF. Certbot tự cài cert + gia hạn vào nginx:
 
 ```bash
-sudo apt install -y certbot
-sudo systemctl stop waf
-sudo certbot certonly --standalone -d waf.example.com   # thay domain của bạn
-sudo systemctl start waf
+sudo apt install -y nginx certbot python3-certbot-nginx
+# Tạo site nginx reverse-proxy về WAF (xem block nginx ở mục 3.5), rồi:
+sudo certbot --nginx -d waf.example.com   # tự cấp cert + sửa config + bật auto-renew
 ```
 
-Cert nằm ở `/etc/letsencrypt/live/waf.example.com/`. Vì binary chạy bằng user
-`waf` (không đọc được `/etc/letsencrypt`), copy cert sang thư mục WAF qua một
-**deploy-hook** để mỗi lần gia hạn tự cập nhật:
+Certbot tự dựng timer gia hạn; kiểm tra `sudo certbot renew --dry-run`. WAF không
+đụng tới cert — chỉ nhận HTTP từ nginx trên loopback.
 
-```bash
-sudo tee /etc/letsencrypt/renewal-hooks/deploy/waf-copy.sh >/dev/null <<'EOF'
-#!/bin/bash
-D=/etc/letsencrypt/live/waf.example.com
-install -m 644 -o waf -g waf "$D/fullchain.pem" /opt/waf/configs/certs/fullchain.pem
-install -m 600 -o waf -g waf "$D/privkey.pem"   /opt/waf/configs/certs/privkey.pem
-systemctl restart waf
-EOF
-sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/waf-copy.sh
-sudo /etc/letsencrypt/renewal-hooks/deploy/waf-copy.sh   # chạy lần đầu
-```
+> Chưa có domain (demo LAN)? Dùng **Caddy** với `tls internal` (cert nội bộ tự ký
+> tự động) hoặc **Cloudflare Tunnel** (TLS ở edge, không cần cổng 443 mở).
 
-Certbot tự cài timer gia hạn; kiểm tra bằng `sudo certbot renew --dry-run`.
+### 9.5. Truy cập trang admin
 
-> Chỉ demo trong LAN, chưa có domain? Bỏ qua Let's Encrypt — tạo cert tự ký
-> (`./scripts/generate_certs.sh`, trỏ `cert_file`/`key_file` vào đó) và chấp nhận
-> cảnh báo trình duyệt.
+Với `trusted_proxies` + `real_ip_header` đã cấu hình, chỉ cần đặt **IP thật của
+máy quản trị** vào `allowed_cidrs` (mục 9.3) là quản trị trực tiếp qua
+`https://waf.example.com/dashboard` — proxy chuyển IP thật, gate so đúng IP đó.
 
-### 9.5. Truy cập trang admin an toàn (SSH tunnel)
-
-Giữ `allowed_cidrs` chỉ loopback rồi mở tunnel từ máy bạn — request admin sẽ tới
-WAF với `RemoteAddr = 127.0.0.1`, qua được cổng gác mà **không phải mở admin ra
-Internet**:
-
-```bash
-# Trên máy của bạn: forward localhost:8443 → cổng 443 trên server
-ssh -N -L 8443:127.0.0.1:443 deploy@waf.example.com
-# Rồi mở trình duyệt:  https://127.0.0.1:8443/dashboard
-# Đăng nhập admin/admin → ĐỔI MẬT KHẨU NGAY
-```
-
-> Muốn admin trực tiếp không qua tunnel? Thêm IP tĩnh của bạn vào `allowed_cidrs`
-> (ví dụ `203.0.113.5/32`) thay vì mở rộng dải. Tránh dùng dải lớn hay `0.0.0.0/0`.
+> IP nhà/văn phòng động? Hai lựa chọn an toàn: (a) vẫn giữ một dòng loopback trong
+> `allowed_cidrs` và quản trị qua **SSH tunnel**
+> (`ssh -N -L 8080:127.0.0.1:8080 deploy@server` rồi mở
+> `http://127.0.0.1:8080/dashboard`); hoặc (b) đặt admin sau **Cloudflare Access**
+> (yêu cầu đăng nhập trước khi tới proxy). Tránh nới `allowed_cidrs` thành dải lớn
+> hay `0.0.0.0/0`.
 
 ### 9.6. Firewall đám mây / security group
 
@@ -521,13 +504,14 @@ Chỉ mở **3 cổng vào**; mọi cổng nội bộ phải đóng với Intern
 | Cổng | Hướng | Mở ra Internet? |
 |---|---|---|
 | `22` (SSH) | vào | ✅ (tốt nhất giới hạn theo IP quản trị) |
-| `80`, `443` (WAF) | vào | ✅ |
-| `3000` (backend), `8000` (ML), `5432` (Postgres) | — | ❌ **Đóng** |
+| `80`, `443` (proxy TLS) | vào | ✅ |
+| `8080` (WAF), `3000` (backend), `8000` (ML), `5432` (Postgres) | — | ❌ **Đóng** |
 
 ```bash
 # Tường lửa máy (ufw) — lớp phòng thủ thứ hai sau security group đám mây
 sudo ufw allow 22/tcp
 sudo ufw allow 80,443/tcp
+sudo ufw deny 8080/tcp        # WAF chỉ nhận từ proxy qua loopback
 sudo ufw deny 3000/tcp        # phòng khi backend lỡ bind 0.0.0.0
 sudo ufw enable
 ```
@@ -535,17 +519,18 @@ sudo ufw enable
 Ở AWS/GCP/Azure, đặt quy tắc tương đương trong **Security Group / firewall đám mây**
 — đừng chỉ dựa vào ufw.
 
-### 9.7. DNS & (tùy chọn) CDN phía trước
+### 9.7. DNS & Cloudflare phía trước
 
-- Trỏ bản ghi **A** `waf.example.com` → IP công khai của server.
-- **Nếu muốn đặt Cloudflare/CDN trước WAF:** đọc kỹ — vì WAF *tin tuyệt đối*
-  `X-Forwarded-For`/`CF-Connecting-IP` (xem [parser.go](internal/parser/parser.go:71)),
-  việc đứng trực tiếp ra Internet khiến kẻ tấn công có thể **giả mạo IP** để né
-  blacklist/rate-limit. Đặt sau Cloudflare *và* khóa firewall server **chỉ nhận
-  kết nối từ dải IP Cloudflare** sẽ vừa lấy được IP client thật (Cloudflare ghi đè
-  header), vừa chặn giả mạo. Khi đó vẫn quản trị qua **SSH tunnel** (mục 9.5) để
-  cổng gác admin theo `RemoteAddr` hoạt động đúng — đừng nới `allowed_cidrs` cho
-  dải Cloudflare, vì thế là mở admin cho mọi khách đi qua CDN.
+- Trỏ bản ghi **A** `waf.example.com` → IP công khai của server (hoặc dùng
+  Cloudflare Tunnel, không cần IP public).
+- **Đặt sau Cloudflare:** terminate TLS ở edge, set `real_ip_header:
+  "CF-Connecting-IP"` (Cloudflare *ghi đè* header này nên không giả mạo được) và
+  thêm IP cloudflared/edge vào `admin.trusted_proxies`. **Khóa firewall server chỉ
+  nhận kết nối từ dải IP Cloudflare** — nếu không, kẻ tấn công đi thẳng vào origin
+  và giả `X-Forwarded-For` để né blacklist/rate-limit (lớp rule/behavior vẫn tin
+  XFF leftmost — xem [parser.go](internal/parser/parser.go:71)).
+- Quản trị: đặt IP thật của bạn vào `allowed_cidrs` (gate admin đã dùng IP thật
+  qua `trusted_proxies`), hoặc bọc admin bằng **Cloudflare Access**.
 
 ### 9.8. Kiểm thử end-to-end
 
@@ -565,17 +550,17 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 curl -m 5 -sI http://waf.example.com:3000/ ; echo "exit=$?"   # → timeout/refused
 ```
 
-Mở `/dashboard` (qua tunnel) → tab **Access Log** sẽ thấy các request bị `BLOCK`
-kèm rule đã khớp và điểm anomaly; tab **Audit Log** (chỉ admin) ghi sự kiện đăng
-nhập/đổi cấu hình.
+Mở `/dashboard` → tab **Access Log** sẽ thấy các request bị `BLOCK` kèm rule đã
+khớp và điểm anomaly; tab **Audit Log** (chỉ admin) ghi sự kiện đăng nhập/đổi
+cấu hình.
 
 ### 9.9. Tóm tắt khác biệt so với deploy nội bộ
 
 | Hạng mục | Nội bộ (mục 3/4) | Public + Juice Shop (mục 9) |
 |---|---|---|
-| `server.listen` | `:8080` / `:8443` | `:80` / `:443` |
+| `server.listen` | `127.0.0.1:8080` | `127.0.0.1:8080` (sau proxy) |
+| TLS | không (HTTP) hoặc Caddy `tls internal` | nginx + Let's Encrypt, hoặc Cloudflare |
 | `upstream.url` | app nội bộ | `http://127.0.0.1:3000` (Juice Shop) |
-| TLS | self-signed | Let's Encrypt + auto-renew |
 | `require_auth` | có thể `false` khi test | **bắt buộc `true`** |
-| Admin | mở trực tiếp trong LAN | **SSH tunnel**, giữ loopback CIDR |
-| Firewall | tùy | chỉ `22/80/443`; chặn `3000/8000/5432` |
+| Admin | mở trực tiếp trong LAN | IP thật trong `allowed_cidrs` + `trusted_proxies` |
+| Firewall | tùy | chỉ `22/443`; chặn `8080/3000/8000/5432` |

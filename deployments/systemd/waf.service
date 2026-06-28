@@ -21,10 +21,9 @@ Restart=on-failure
 RestartSec=5
 TimeoutStartSec=30
 
-# Allow binding to :80/:443 without running as root (for a public deploy
-# where you set server.listen to :80 / :443 in config.yaml).
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# The WAF serves plain HTTP on server.listen (:8080 by default) — an
+# unprivileged port — so no CAP_NET_BIND_SERVICE is needed. TLS / port 443 is
+# handled by a fronting proxy (nginx/Caddy/Cloudflare), not this service.
 
 # Hardening
 NoNewPrivileges=true

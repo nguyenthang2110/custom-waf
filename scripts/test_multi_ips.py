@@ -11,8 +11,11 @@ clearly-malicious, and gray-zone payloads at the WAF. Useful for:
   - Exercising rate-limit per-IP buckets
 
 Examples:
-    # default — one round, https://localhost:8443
+    # default — one round against the local WAF (http://localhost:8080)
     python test_multi_ips.py
+
+    # run THROUGH the public Cloudflare tunnel (auto-discovers the URL)
+    python test_multi_ips.py --tunnel
 
     # three rounds, slower, reproducible seed
     python test_multi_ips.py --rounds 3 --delay 0.2 --seed 42
@@ -23,14 +26,16 @@ Examples:
     # rate-limit burst from a single IP
     python test_multi_ips.py --burst 10.0.0.99 --burst-count 200
 
-    # custom WAF endpoint
-    python test_multi_ips.py --url http://localhost:8080
+    # explicit endpoint (e.g. a fixed tunnel/domain)
+    python test_multi_ips.py --url https://waf.example.com
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import random
+import re
 import sys
 import time
 from collections import Counter, defaultdict
@@ -249,12 +254,49 @@ def print_summary(stats: Stats) -> None:
     print(bar)
 
 
+# --- Tunnel discovery -----------------------------------------------------
+
+# Default place the `cloudflared tunnel --url ...` output is logged when started
+# per docs/DEMO_JUICESHOP.md / the deploy guide.
+DEFAULT_TUNNEL_LOG = "/tmp/cf_tunnel.log"
+_TRYCF_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+
+
+def discover_tunnel_url(log_path: str) -> Optional[str]:
+    """Find the active public Cloudflare tunnel URL.
+
+    Resolution order:
+      1. $WAF_TUNNEL_URL — an explicit override (e.g. a named tunnel / domain).
+      2. The last trycloudflare.com URL printed in the cloudflared log file
+         (quick tunnels print a fresh random URL on every start).
+    Returns None if nothing is found.
+    """
+    env = os.environ.get("WAF_TUNNEL_URL")
+    if env:
+        return env.rstrip("/")
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as fh:
+            matches = _TRYCF_RE.findall(fh.read())
+        if matches:
+            return matches[-1].rstrip("/")
+    except OSError:
+        pass
+    return None
+
+
 # --- Entry point ----------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Multi-IP WAF traffic generator")
-    p.add_argument("--url", default="https://localhost:8443",
+    p.add_argument("--url", default="http://localhost:8080",
                    help="WAF base URL (default: %(default)s)")
+    p.add_argument("--tunnel", action="store_true",
+                   help="Target the public Cloudflare tunnel instead of --url "
+                        "(auto-discovers the URL from $WAF_TUNNEL_URL or the "
+                        "cloudflared log)")
+    p.add_argument("--tunnel-log", default=DEFAULT_TUNNEL_LOG,
+                   help="cloudflared log file to read the tunnel URL from "
+                        "(default: %(default)s)")
     p.add_argument("--rounds", type=int, default=1,
                    help="Repeat the IP loop this many times")
     p.add_argument("--delay", type=float, default=0.1,
@@ -289,6 +331,19 @@ def main() -> int:
 
     global REQUEST_DELAY
     REQUEST_DELAY = max(0.0, args.delay)
+
+    # When --tunnel is set, resolve the public Cloudflare URL and override
+    # args.url so the rest of main() (precheck, sends, summary) is unchanged.
+    if args.tunnel:
+        tunnel_url = discover_tunnel_url(args.tunnel_log)
+        if not tunnel_url:
+            print("Error: --tunnel set but no tunnel URL found.")
+            print(f"Hint: start one with  cloudflared tunnel --url "
+                  f"http://localhost:8080 > {args.tunnel_log} 2>&1 &")
+            print("      or export WAF_TUNNEL_URL=https://<your>.trycloudflare.com")
+            return 1
+        args.url = tunnel_url
+        print(f"Tunnel: {args.url}  (public Cloudflare)")
 
     if not precheck(args.url):
         return 1

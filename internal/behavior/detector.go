@@ -24,6 +24,7 @@ type BehaviorConfig struct {
 	// Bruteforce detection
 	BruteForceThreshold int           // Failed attempts before blocking
 	BruteForceWindow    time.Duration // Time window for counting attempts
+	BlockDuration       time.Duration // How long a tripped IP stays blocked
 
 	// Bot detection
 	BotDetectionEnabled bool
@@ -97,6 +98,9 @@ func NewDetector(config BehaviorConfig) *Detector {
 	if config.BruteForceWindow == 0 {
 		config.BruteForceWindow = 5 * time.Minute
 	}
+	if config.BlockDuration == 0 {
+		config.BlockDuration = 10 * time.Minute
+	}
 	if config.BotScoreThreshold == 0 {
 		config.BotScoreThreshold = 0.7
 	}
@@ -122,6 +126,25 @@ func NewDetector(config BehaviorConfig) *Detector {
 	d.startCleanup()
 
 	return d
+}
+
+// GetConfig returns a snapshot of the live behavior config. Thread-safe —
+// callers read the bruteforce / auto-ban knobs that the dashboard can mutate
+// at runtime via SetConfig.
+func (d *Detector) GetConfig() BehaviorConfig {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.config
+}
+
+// SetConfig replaces the live behavior config wholesale. Thread-safe. Callers
+// follow the GetConfig → modify → SetConfig pattern so untouched fields keep
+// their value. Takes the same write lock as Analyze, so an in-flight request's
+// bruteforce/auto-ban thresholds never read a half-updated config.
+func (d *Detector) SetConfig(cfg BehaviorConfig) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.config = cfg
 }
 
 // Analyze performs behavior analysis on a request
@@ -171,6 +194,7 @@ func (d *Detector) Analyze(req *engine.ParsedRequest, evalResult *engine.Evaluat
 		result.ThreatDetected = true
 		result.ThreatTypes = append(result.ThreatTypes, "TEMPORARILY_BLOCKED")
 		result.RecommendAction = "BLOCK"
+		result.BlockedUntil = stats.blockedUntil
 		return result
 	} else if stats.isBlocked && now.After(stats.blockedUntil) {
 		// Unblock after timeout
@@ -223,7 +247,8 @@ func (d *Detector) checkBruteForce(stats *ipStatistics, evalResult *engine.Evalu
 
 			// Block IP temporarily
 			stats.isBlocked = true
-			stats.blockedUntil = now.Add(10 * time.Minute)
+			stats.blockedUntil = now.Add(d.config.BlockDuration)
+			result.BlockedUntil = stats.blockedUntil
 		}
 	} else {
 		// Reset counter if outside window
@@ -524,6 +549,11 @@ type BehaviorResult struct {
 	ThreatTypes     []string
 	SuspicionScore  float64
 	RecommendAction string
+	// BlockedUntil is non-zero when this IP is under an auto-ban (repeat
+	// offender). The middleware promotes it into the access-control blacklist
+	// with the remaining TTL so the ban applies on every path, not just the
+	// behaviour-scored ones. Zero value = not auto-banned.
+	BlockedUntil time.Time
 }
 
 // IPStats contains statistics for an IP address

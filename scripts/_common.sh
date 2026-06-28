@@ -5,7 +5,7 @@
 # file at the top and then calls require_curl_jq + waf_login. All scripts
 # share the same env-overridable defaults:
 #
-#   WAF_URL=https://127.0.0.1:8443 ADMIN_USER=admin ADMIN_PASS=admin123
+#   WAF_URL=http://localhost:8080 ADMIN_USER=admin ADMIN_PASS=admin123
 #
 # Tests assume `make run` (or the WAF binary built from current sources)
 # is already serving at WAF_URL.
@@ -14,7 +14,7 @@
 # caller decide its own bash flags.
 
 # Defaults — override by exporting before running the test.
-WAF_URL="${WAF_URL:-https://127.0.0.1:8443}"
+WAF_URL="${WAF_URL:-http://localhost:8080}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-admin123}"
 

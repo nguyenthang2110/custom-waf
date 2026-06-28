@@ -3,6 +3,7 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -302,6 +303,14 @@ func (w *WAFMiddleware) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		w.config.Metrics.RecordBehaviorThreat(threat)
 	}
 
+	// Promote a fresh repeat-offender auto-ban into the access-control
+	// blacklist so the IP is rejected on EVERY path (incl. bypass paths like
+	// /socket.io) until the ban expires — not just on behaviour-scored hits.
+	// Skipped in dry-run: dry-run must never mutate enforcement state.
+	if !w.config.DryRun {
+		promoteBanToBlacklist(w.config.DecisionEngine, behaviorResult, time.Now())
+	}
+
 	// ========================================================================
 	// STEP 6: Make Final Decision
 	// ========================================================================
@@ -425,13 +434,21 @@ func (w *WAFMiddleware) blockRequest(
 	// Set headers
 	rw.Header().Set("X-WAF-Status", "BLOCKED")
 	rw.Header().Set("X-WAF-Request-ID", parsed.RequestID)
-	rw.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-	// Write status code
-	rw.WriteHeader(statusCode)
-
-	// Write block page
-	blockPage := w.getBlockPage(parsed.RequestID, reason)
+	// Content negotiation: API/XHR callers (e.g. an SPA's fetch to a JSON
+	// endpoint) get a compact JSON body — returning the full HTML block page
+	// to them makes the framework render our markup as raw text. Browser page
+	// loads still get the styled HTML page.
+	var blockPage string
+	if wantsJSONResponse(parsed) {
+		rw.Header().Set("Content-Type", "application/json; charset=utf-8")
+		rw.WriteHeader(statusCode)
+		blockPage = getBlockJSON(parsed.RequestID, reason)
+	} else {
+		rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+		rw.WriteHeader(statusCode)
+		blockPage = w.getBlockPage(parsed.RequestID, reason)
+	}
 	io.WriteString(rw, blockPage)
 
 	// Record metrics
@@ -445,6 +462,22 @@ func (w *WAFMiddleware) blockRequest(
 		parsed.BodySize,
 		len(blockPage),
 	)
+}
+
+// promoteBanToBlacklist mirrors a behaviour-detector auto-ban into the
+// decision engine's access-control blacklist. When an IP trips the repeat-
+// offender threshold the behaviour result carries BlockedUntil; we add the IP
+// to the blacklist with the remaining TTL so subsequent requests are rejected
+// at the very front of the pipeline (blacklist is checked before bypass paths
+// and rule evaluation) and the IP surfaces in the dashboard's blacklist view.
+// Idempotent: re-adding the same IP just refreshes the expiry to the same
+// absolute instant. Returns true when an entry was (re)written.
+func promoteBanToBlacklist(de *decision.DecisionEngine, br *behavior.BehaviorResult, now time.Time) bool {
+	if de == nil || br == nil || br.BlockedUntil.IsZero() || !br.BlockedUntil.After(now) {
+		return false
+	}
+	de.AddBlacklistIPWithTTL(br.ClientIP, br.BlockedUntil.Sub(now))
+	return true
 }
 
 // dispatchAlert builds a notifier.Event from a finalized decision and
@@ -523,6 +556,53 @@ func (w *WAFMiddleware) proxyErrorHandler(rw http.ResponseWriter, r *http.Reques
 // Response Pages
 // ============================================================================
 
+// wantsJSONResponse decides whether a blocked caller should get a JSON body
+// instead of the HTML block page. SPAs and API clients send XHR/fetch requests
+// that expect JSON — handing them a full HTML document makes the framework
+// echo our markup as raw text on screen. We serve JSON when the request looks
+// programmatic and fall back to the human-facing HTML page otherwise.
+func wantsJSONResponse(parsed *engine.ParsedRequest) bool {
+	hdr := func(name string) string {
+		if vs := parsed.RawHeaders[name]; len(vs) > 0 {
+			return vs[0]
+		}
+		return ""
+	}
+	// Top-level browser navigation → HTML page.
+	if mode := hdr("Sec-Fetch-Mode"); strings.EqualFold(mode, "navigate") {
+		return false
+	}
+	// Classic XHR marker (Angular/jQuery/axios often set this).
+	if strings.EqualFold(hdr("X-Requested-With"), "XMLHttpRequest") {
+		return true
+	}
+	accept := strings.ToLower(hdr("Accept"))
+	if strings.Contains(accept, "application/json") {
+		return true
+	}
+	if strings.Contains(accept, "text/html") {
+		return false
+	}
+	// No strong signal (e.g. curl's */*) → keep the human-facing HTML page.
+	return false
+}
+
+// getBlockJSON returns a compact machine-readable block body for API/XHR
+// callers. Mirrors the fields shown on the HTML page so a frontend can surface
+// them in its own UI.
+func getBlockJSON(requestID, reason string) string {
+	jsonEscape := func(s string) string {
+		b, _ := json.Marshal(s)
+		// json.Marshal wraps in quotes; strip them for inline interpolation.
+		return string(b[1 : len(b)-1])
+	}
+	ts := time.Now().UTC().Format(time.RFC3339)
+	return fmt.Sprintf(
+		`{"blocked":true,"error":"Forbidden","message":"Request blocked by Web Application Firewall","reason":"%s","ray_id":"%s","timestamp":"%s"}`,
+		jsonEscape(reason), jsonEscape(requestID), ts,
+	)
+}
+
 // getBlockPage returns the Cloudflare-style block page. Clean neutral
 // design — no scary animations. Shows request ID + IP + timestamp so the
 // user can quote them if they file a false-positive ticket.
@@ -540,70 +620,97 @@ const blockPageTpl = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Access denied · WAF</title>
+<meta name="robots" content="noindex,nofollow">
+<title>Access denied · Security check</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#f6f7f9; --card:#fff; --line:#e6e8eb;
-  --fg:#1f2937; --fg-2:#4b5563; --fg-3:#6b7280; --fg-4:#9ca3af;
-  --accent:#dc2626; --accent-soft:#fee2e2;
-  --code-bg:#f3f4f6;
+  --bg:#f4f5f7; --bg-grad:#eef0f3; --card:#fff; --line:#e6e8eb;
+  --fg:#111827; --fg-2:#4b5563; --fg-3:#6b7280; --fg-4:#9ca3af;
+  --accent:#dc2626; --accent-2:#b91c1c; --accent-soft:#fef2f2; --accent-ring:rgba(220,38,38,.14);
+  --code-bg:#f3f4f6; --ok:#16a34a;
 }
 @media (prefers-color-scheme: dark){
-  :root{ --bg:#0f1115;--card:#161b22;--line:#262c36;--fg:#e6edf3;--fg-2:#9ba6b6;--fg-3:#6e7681;--fg-4:#484f58;--accent:#f87171;--accent-soft:rgba(248,113,113,0.12);--code-bg:#1c2128 }
+  :root{ --bg:#0d1017;--bg-grad:#11151c;--card:#161b22;--line:#262c36;--fg:#e6edf3;--fg-2:#9ba6b6;--fg-3:#6e7681;--fg-4:#484f58;--accent:#f87171;--accent-2:#fca5a5;--accent-soft:rgba(248,113,113,0.10);--accent-ring:rgba(248,113,113,.18);--code-bg:#1c2128;--ok:#3fb950 }
 }
 html,body{height:100%%}
-body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;background:var(--bg);color:var(--fg);line-height:1.55}
-.wrap{max-width:760px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;padding:24px}
-.top{display:flex;align-items:center;gap:10px;padding:12px 0;color:var(--fg-3);font-size:13px}
-.top .dot{width:8px;height:8px;border-radius:50%%;background:var(--accent)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:32px 36px;margin:24px 0}
-.h1{font-size:22px;font-weight:600;letter-spacing:-.01em;margin-bottom:8px}
-.h2{font-size:14px;font-weight:600;color:var(--fg-2);margin:18px 0 6px;text-transform:uppercase;letter-spacing:.04em}
-.lead{color:var(--fg-2);font-size:15px;margin-bottom:8px}
-.code-block{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:10px 14px;font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;color:var(--fg-2);word-break:break-all}
-.kv{display:grid;grid-template-columns:140px 1fr;gap:10px 16px;font-size:13px;color:var(--fg-2);align-items:center}
-.kv b{color:var(--fg-3);font-weight:500;text-transform:uppercase;font-size:11px;letter-spacing:.05em}
-.kv .v{font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--fg);font-size:12.5px}
-.section + .section{margin-top:18px;padding-top:18px;border-top:1px dashed var(--line)}
-.foot{margin-top:auto;padding-top:20px;color:var(--fg-4);font-size:12px;text-align:center;line-height:1.7}
+body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;color:var(--fg);line-height:1.55;
+  background:radial-gradient(1200px 600px at 50%% -10%%,var(--accent-ring),transparent 60%%),linear-gradient(180deg,var(--bg),var(--bg-grad))}
+.wrap{max-width:680px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:28px 20px}
+.brand{display:flex;align-items:center;gap:9px;justify-content:center;color:var(--fg-3);font-size:13px;font-weight:500;margin-bottom:18px}
+.brand .logo{width:20px;height:20px;color:var(--accent)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:34px 34px 28px;box-shadow:0 1px 2px rgba(0,0,0,.04),0 12px 40px -12px rgba(0,0,0,.12)}
+.hero{display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:22px}
+.icon-ring{width:72px;height:72px;border-radius:50%%;display:flex;align-items:center;justify-content:center;background:var(--accent-soft);border:1px solid var(--accent-ring);margin-bottom:16px}
+.icon-ring svg{width:34px;height:34px;color:var(--accent)}
+.badge{display:inline-flex;align-items:center;gap:7px;padding:4px 11px;background:var(--accent-soft);color:var(--accent);border:1px solid var(--accent-ring);border-radius:999px;font-size:12px;font-weight:600;letter-spacing:.02em;margin-bottom:14px}
+.h1{font-size:24px;font-weight:700;letter-spacing:-.02em;margin-bottom:10px}
+.lead{color:var(--fg-2);font-size:15px;max-width:46ch;margin:0 auto}
+.divider{height:1px;background:var(--line);margin:22px 0}
+.h2{font-size:12px;font-weight:600;color:var(--fg-3);margin-bottom:10px;text-transform:uppercase;letter-spacing:.06em}
+.help{display:grid;gap:9px}
+.help li{display:flex;gap:10px;align-items:flex-start;color:var(--fg-2);font-size:14px;list-style:none}
+.help li svg{width:16px;height:16px;color:var(--fg-4);flex:0 0 16px;margin-top:3px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:9px 16px;font-size:13px;align-items:center}
+.kv b{color:var(--fg-3);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+.kv .v{font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--fg);font-size:12.5px;word-break:break-all}
+.ray{display:flex;align-items:center;gap:8px}
+.copy{appearance:none;cursor:pointer;border:1px solid var(--line);background:var(--code-bg);color:var(--fg-3);border-radius:6px;padding:2px 8px;font-size:11px;font-weight:600;letter-spacing:.03em;transition:.15s}
+.copy:hover{color:var(--fg);border-color:var(--fg-4)}
+.copy.done{color:var(--ok);border-color:var(--ok)}
+.actions{display:flex;gap:10px;justify-content:center;margin-top:22px;flex-wrap:wrap}
+.btn{appearance:none;cursor:pointer;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:9px;padding:9px 18px;font-size:14px;font-weight:600;transition:.15s;text-decoration:none;display:inline-flex;align-items:center;gap:7px}
+.btn:hover{border-color:var(--fg-4)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:var(--accent-2);border-color:var(--accent-2)}
+.foot{margin-top:22px;color:var(--fg-4);font-size:12px;text-align:center;line-height:1.7}
 .foot strong{color:var(--fg-3);font-weight:600}
-.error-badge{display:inline-flex;align-items:center;gap:8px;padding:4px 10px;background:var(--accent-soft);color:var(--accent);border-radius:999px;font-size:12px;font-weight:600;letter-spacing:.02em;margin-bottom:14px}
-.shield{width:18px;height:18px}
-ul{margin-left:18px;color:var(--fg-2);font-size:14px}
-ul li{margin:4px 0}
+@media(max-width:520px){.card{padding:26px 20px 22px}.h1{font-size:21px}}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <div class="top"><span class="dot"></span><span>Web Application Firewall</span></div>
-
-  <div class="card">
-    <span class="error-badge">
-      <svg class="shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-      Error 1020 — Access denied
-    </span>
-    <h1 class="h1">Sorry, you have been blocked</h1>
-    <p class="lead">You are unable to access this site. The Web Application Firewall identified your request as potentially malicious and stopped it before it reached the application.</p>
-
-    <h2 class="h2">Why was I blocked?</h2>
-    <p class="lead">This protection is automatic. Common triggers include scanner tools, SQL/script-like payloads in URLs or form fields, unusual request patterns, or known-bad IP/User-Agent.</p>
-
-    <h2 class="h2">What can I do?</h2>
-    <ul>
-      <li>Refresh and try again from a normal browser session.</li>
-      <li>If you own this site, check the WAF logs for the request ID below.</li>
-      <li>If you are a legitimate user, contact the site owner and include the details below.</li>
-    </ul>
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    <span>Web Application Firewall</span>
   </div>
 
   <div class="card">
-    <h2 class="h2" style="margin-top:0">Incident details</h2>
+    <div class="hero">
+      <div class="icon-ring">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      </div>
+      <span class="badge">Error 1020 · Access denied</span>
+      <h1 class="h1">Sorry, you have been blocked</h1>
+      <p class="lead">Our Web Application Firewall flagged your request as potentially malicious and stopped it before it reached the application.</p>
+    </div>
+
+    <div class="divider"></div>
+
+    <h2 class="h2">What you can do</h2>
+    <ul class="help">
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Refresh the page and try again from a normal browser session.</li>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>If you are a legitimate user, contact the site owner and include the details below.</li>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>If you own this site, look up the Ray ID below in your WAF logs.</li>
+    </ul>
+
+    <div class="divider"></div>
+
+    <h2 class="h2">Incident details</h2>
     <div class="kv">
-      <b>Ray ID</b><span class="v">%s</span>
+      <b>Ray ID</b>
+      <span class="v ray"><span id="ray">%s</span><button class="copy" id="copy" type="button" aria-label="Copy Ray ID">Copy</button></span>
       <b>Reason</b><span class="v">%s</span>
       <b>Timestamp</b><span class="v">%s</span>
       <b>Host</b><span class="v">%s</span>
+    </div>
+
+    <div class="actions">
+      <button class="btn primary" type="button" onclick="location.reload()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Try again
+      </button>
+      <a class="btn" href="/">Go to homepage</a>
     </div>
   </div>
 
@@ -612,6 +719,17 @@ ul li{margin:4px 0}
     Performance &amp; security by an in-house Web Application Firewall.
   </div>
 </div>
+<script>
+(function(){
+  var b=document.getElementById('copy'),r=document.getElementById('ray');
+  if(!b||!r)return;
+  b.addEventListener('click',function(){
+    var t=r.textContent.trim();
+    var done=function(){b.textContent='Copied';b.classList.add('done');setTimeout(function(){b.textContent='Copy';b.classList.remove('done')},1600)};
+    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done).catch(done)}else{done()}
+  });
+})();
+</script>
 </body>
 </html>`
 

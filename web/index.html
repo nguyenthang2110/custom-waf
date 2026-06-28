@@ -2645,6 +2645,9 @@
                 const burst    = cfg ? cfg.rate_limit.burst_size         : 20;
                 const epLimits = (cfg && cfg.rate_limit.endpoint_limits) ? cfg.rate_limit.endpoint_limits : {};
                 const epCount  = Object.keys(epLimits).length;
+                const bfThresh = (cfg && cfg.behavior) ? cfg.behavior.bruteforce_threshold  : 5;
+                const bfWindow = (cfg && cfg.behavior) ? cfg.behavior.bruteforce_window_sec : 300;
+                const banDur   = (cfg && cfg.behavior) ? cfg.behavior.block_duration_sec    : 600;
 
                 const sub = this.configSubTab || 'backend';
 
@@ -2652,6 +2655,7 @@
                     { id: 'backend',    label: 'Backend Server',  icon: 'M5 12h14M12 5l7 7-7 7',                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          meta: '' },
                     { id: 'detection',  label: 'Detection',       icon: 'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z',                                                                                                                                                                                                  meta: `${block_t.toFixed(1)} / ${mon_t.toFixed(1)}` },
                     { id: 'ratelimit',  label: 'Rate Limiting',   icon: 'M13 10V3L4 14h7v7l9-11h-7z',                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       meta: `${rpm} rpm` },
+                    { id: 'behavior',   label: 'Auto-Ban',        icon: 'M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636',                                                                                                                                                                                                                                                                                                                                                                                                                          meta: `${bfThresh}× / ${this._fmtDur(banDur)}` },
                     { id: 'ml',         label: 'ML Inference',    icon: 'M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z',                                                                                                                                                                                                                                                                                                                                                                                                              meta: this.mlConfig ? (this.mlConfig.enabled ? 'on' : 'off') : '' }
                 ];
 
@@ -2673,6 +2677,7 @@
                 switch (sub) {
                     case 'detection': body = this._renderConfigDetection(block_t, mon_t); break;
                     case 'ratelimit': body = this._renderConfigRateLimit(rpm, burst, epLimits, epCount); break;
+                    case 'behavior':  body = this._renderConfigBehavior(bfThresh, bfWindow, banDur); break;
                     case 'ml':        body = this._renderConfigML(); break;
                     case 'backend':
                     default:          body = this._renderConfigBackend(); break;
@@ -2765,6 +2770,67 @@
                         <div class="mt-5 rounded-lg p-3 flex items-start gap-2.5" style="background: var(--pill-log-bg); border: 1px solid var(--pill-log-bd);">
                             <svg class="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="color: var(--pill-log-fg);"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                             <p class="text-xs" style="color: var(--fg-1);">Lower the block threshold for stricter protection. The gray zone <span class="font-mono" style="color: var(--accent);">[monitor, block)</span> is where the ML model can override the verdict.</p>
+                        </div>
+                    </div>
+                `;
+            }
+
+            _fmtDur(sec) {
+                sec = Number(sec) || 0;
+                if (sec % 86400 === 0 && sec >= 86400) return (sec / 86400) + 'd';
+                if (sec % 3600 === 0 && sec >= 3600)   return (sec / 3600) + 'h';
+                if (sec % 60 === 0 && sec >= 60)       return (sec / 60) + 'm';
+                return sec + 's';
+            }
+
+            _renderConfigBehavior(bfThresh, bfWindow, banDur) {
+                return `
+                    <div class="glass p-6">
+                        <div class="section-head">
+                            <div class="section-icon" style="color: var(--pill-block-fg);"><svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg></div>
+                            <div>
+                                <h3 class="text-base font-bold">Auto-Ban (Repeat Offender)</h3>
+                                <p class="text-xs text-faint">Tự chặn IP gửi nhiều request bị block trong thời gian ngắn</p>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-3 gap-3 mb-5">
+                            ${this.renderStatCard('Ngưỡng',    bfThresh + '×',           'red')}
+                            ${this.renderStatCard('Cửa sổ',    this._fmtDur(bfWindow),   'amber')}
+                            ${this.renderStatCard('Ban',       this._fmtDur(banDur),     'cyan')}
+                        </div>
+
+                        <form onsubmit="dashboard.updateWAFConfig(event)" class="space-y-4">
+                            <div class="grid md:grid-cols-3 gap-3">
+                                <div>
+                                    <label class="block text-xs text-muted mb-1.5">Ngưỡng ban <span class="text-faint">(số request bị chặn)</span></label>
+                                    <input type="number" step="1" min="1" max="1000" name="bruteforce_threshold" value="${bfThresh}" required class="pill-input w-full">
+                                    <p class="text-[11px] text-faint mt-1">1 – 1000</p>
+                                </div>
+                                <div>
+                                    <label class="block text-xs text-muted mb-1.5">Cửa sổ đếm <span class="text-faint">(giây)</span></label>
+                                    <input type="number" step="1" min="5" max="86400" name="bruteforce_window_sec" value="${bfWindow}" required class="pill-input w-full">
+                                    <p class="text-[11px] text-faint mt-1">5s – 24h · hiện: ${this._fmtDur(bfWindow)}</p>
+                                </div>
+                                <div>
+                                    <label class="block text-xs text-muted mb-1.5">Thời gian ban <span class="text-faint">(giây)</span></label>
+                                    <input type="number" step="1" min="5" max="604800" name="block_duration_sec" value="${banDur}" required class="pill-input w-full">
+                                    <p class="text-[11px] text-faint mt-1">5s – 7d · hiện: ${this._fmtDur(banDur)}</p>
+                                </div>
+                            </div>
+                            <input type="hidden" name="block_threshold"   value="${this.wafConfig ? this.wafConfig.decision.block_threshold : 5.0}">
+                            <input type="hidden" name="monitor_threshold" value="${this.wafConfig ? this.wafConfig.decision.monitor_threshold : 3.0}">
+                            <input type="hidden" name="requests_per_min"  value="${this.wafConfig ? this.wafConfig.rate_limit.requests_per_min : 100}">
+                            <input type="hidden" name="burst_size"        value="${this.wafConfig ? this.wafConfig.rate_limit.burst_size : 20}">
+                            <button type="submit" class="btn btn-primary">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                                Lưu thiết lập auto-ban
+                            </button>
+                        </form>
+
+                        <div class="mt-5 rounded-lg p-3 flex items-start gap-2.5" style="background: var(--pill-log-bg); border: 1px solid var(--pill-log-bd);">
+                            <svg class="w-4 h-4 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="color: var(--pill-log-fg);"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            <p class="text-xs" style="color: var(--fg-1);">IP gửi <span class="font-mono" style="color: var(--accent);">${bfThresh}</span> request bị chặn trong <span class="font-mono" style="color: var(--accent);">${this._fmtDur(bfWindow)}</span> sẽ bị cấm toàn bộ (kể cả <span class="font-mono">/socket.io</span>) trong <span class="font-mono" style="color: var(--accent);">${this._fmtDur(banDur)}</span>, rồi tự gỡ. Áp dụng ngay, không cần restart.</p>
                         </div>
                     </div>
                 `;
@@ -3494,6 +3560,16 @@
                     }
                 };
 
+                // The Auto-Ban tab adds these fields; other tabs omit them, so
+                // only attach `behavior` when the form actually carried it.
+                if (formData.get('bruteforce_threshold') !== null) {
+                    config.behavior = {
+                        bruteforce_threshold:  parseInt(formData.get('bruteforce_threshold')),
+                        bruteforce_window_sec: parseInt(formData.get('bruteforce_window_sec')),
+                        block_duration_sec:    parseInt(formData.get('block_duration_sec'))
+                    };
+                }
+
                 // Validate
                 if (config.decision.monitor_threshold >= config.decision.block_threshold) {
                     this.showPopupNotification(
@@ -3516,12 +3592,10 @@
 
                     if (result.success) {
                         this.wafConfig = result.config;
-                        this.showPopupNotification(
-                            'success',
-                            'Configuration Updated!',
-                            `Block: ${config.decision.block_threshold}, Monitor: ${config.decision.monitor_threshold}, RPM: ${config.rate_limit.requests_per_min}`,
-                            null
-                        );
+                        const detail = config.behavior
+                            ? `Ngưỡng ban: ${config.behavior.bruteforce_threshold}×, Cửa sổ: ${this._fmtDur(config.behavior.bruteforce_window_sec)}, Ban: ${this._fmtDur(config.behavior.block_duration_sec)}`
+                            : `Block: ${config.decision.block_threshold}, Monitor: ${config.decision.monitor_threshold}, RPM: ${config.rate_limit.requests_per_min}`;
+                        this.showPopupNotification('success', 'Configuration Updated!', detail, null);
                         this.render();
                     } else {
                         this.showPopupNotification(
