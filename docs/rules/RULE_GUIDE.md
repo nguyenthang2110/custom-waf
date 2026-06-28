@@ -1,6 +1,6 @@
 # Hướng dẫn viết Rule
 
-> Đây là tài liệu **hướng dẫn từng bước**. Sau khi đọc xong, bạn sẽ biết cách viết một rule mới từ con số 0. Để tra cứu chi tiết từng field, xem [RULE_REFERENCE.md](./RULE_REFERENCE.md).
+> Đây là tài liệu **hướng dẫn từng bước**. Sau khi đọc xong, bạn sẽ biết cách viết một rule mới từ con số 0. Tham khảo bộ luật thật ở [`configs/rules/all_rules.json`](../../configs/rules/all_rules.json).
 
 ---
 
@@ -731,7 +731,5 @@ Pháp lý audit khó truy: rule đã được sửa lúc nào, ai sửa.
 
 ## Bước tiếp theo
 
-- Đọc 6 rule mẫu trong [examples/](./examples/) để xem áp dụng thực tế.
-- Tra [RULE_REFERENCE.md](./RULE_REFERENCE.md) khi cần chi tiết field.
-- Nếu thắc mắc "vì sao thiết kế thế này": xem [DESIGN_NOTES.md](./DESIGN_NOTES.md).
-- Có rule cũ schema v1 muốn nâng cấp: xem [MIGRATION.md](./MIGRATION.md).
+- Xem bộ luật thật đang chạy: [`configs/rules/all_rules.json`](../../configs/rules/all_rules.json) (78 rule, schema v2) để tham khảo cách viết thực tế từng field.
+- Định nghĩa struct rule (v1 + v2) ở `internal/engine/types.go` và `loader.go`.
