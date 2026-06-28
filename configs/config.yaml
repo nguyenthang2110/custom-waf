@@ -1,5 +1,5 @@
 server:
-  listen: "0.0.0.0:8080"   # HTTP only — terminate TLS upstream (Cloudflare/nginx/Caddy)
+  listen: "0.0.0.0:8081"   # DATA PLANE — traffic được bảo vệ → upstream (HTTP, terminate TLS phía ngoài)
   read_timeout: 30
   write_timeout: 30
   idle_timeout: 120
@@ -65,6 +65,11 @@ admin:
   # When local_only=true, requests from any client OUTSIDE allowed_cidrs get a
   # flat 404 — outsiders can't even discover that an admin UI exists.
   # Default (no `admin:` block) is local_only=true with loopback CIDRs.
+  #
+  # listen: CONTROL PLANE — dashboard + /waf-api + /metrics chạy trên cổng RIÊNG,
+  # tách khỏi data plane (server.listen) phục vụ traffic. Nhờ vậy API quản trị
+  # không với tới được từ cổng traffic công khai (mô hình control/data plane).
+  listen: "0.0.0.0:8080"
   local_only: true
   allowed_cidrs:
     - "127.0.0.0/8"   # IPv4 loopback

@@ -610,8 +610,14 @@ func main() {
 		log.Printf("✓ Restored %d audit entries into dashboard ring buffer", n)
 	}
 
-	// Setup HTTP server
-	mux := http.NewServeMux()
+	// Two separate listeners — control plane vs data plane:
+	//   • adminMux   (admin.listen, default :8080) — dashboard, /waf-api,
+	//     /metrics, /admin/* — the MANAGEMENT surface.
+	//   • trafficMux (server.listen)               — protected traffic → upstream.
+	// The management API is mounted ONLY on adminMux, so it is unreachable from
+	// the public traffic port. This is the control/data-plane split SafeLine uses.
+	adminMux := http.NewServeMux()
+	trafficMux := http.NewServeMux()
 
 	// Admin access control — non-local clients get a 404 for every admin
 	// surface (pages + API), so outsiders can't even discover that the
@@ -625,49 +631,38 @@ func main() {
 		log.Println("⚠️  Admin access control: DISABLED (admin endpoints exposed to anyone)")
 	}
 
-	// Authentication pages (serve directly, don't proxy).
-	// Only /login.html exists — there is no public registration page;
-	// accounts are created by an admin from the dashboard.
-	mux.HandleFunc("/login.html", adminAC.WrapFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, web.FS, "login.html")
-	}))
-	log.Println("✓ Authentication page: /login.html")
-
-	// Dashboard (serve embedded files) — gated by adminAC (network) THEN
-	// PageGuard (auth). Outsider → 404. Logged-out local → 302 /login.html.
-	mux.HandleFunc("/dashboard", adminAC.WrapFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/dashboard/", http.StatusPermanentRedirect)
-	}))
-	dashboardFS := http.StripPrefix("/dashboard/", http.FileServer(http.FS(web.FS)))
-	mux.Handle("/dashboard/", adminAC.Wrap(apiServer.PageGuard(dashboardFS)))
-	log.Println("✓ Dashboard endpoint: /dashboard (PageGuard active when require_auth=true)")
-
-	// API endpoints — register on a private mux, then mount the whole tree
-	// behind adminAC at /waf-api/. This wraps every API route with the
-	// access-control check in one shot.
-	apiMux := http.NewServeMux()
-	apiServer.RegisterRoutes(apiMux)
-	mux.Handle("/waf-api/", adminAC.Wrap(apiMux))
-	log.Println("✓ API endpoints registered (admin-gated)")
-
-	// Metrics endpoint (Prometheus) — admin-gated; exposes per-rule hit
-	// counts, request totals, etc. which leak inventory of protected apps.
-	mux.Handle("/metrics", adminAC.Wrap(promhttp.Handler()))
-	log.Println("✓ Metrics endpoint: /metrics (admin-gated)")
-
-	// Health check endpoint — intentionally PUBLIC so external monitors
-	// (load balancer probes, uptime checks) can verify the WAF is alive.
-	// Returns only version + rule count; no per-rule details.
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	// WAF health JSON — public; mounted on BOTH listeners so a monitor can
+	// probe either port. Returns only version + rule count; no per-rule details.
+	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"status":"healthy","version":"%s","rules":%d}`,
 			*version, ruleEngine.RuleCount())
-	})
-	log.Println("✓ Health endpoint: /health (public)")
+	}
 
-	// Admin stats endpoint — full metrics dump, must be local-only.
-	mux.HandleFunc("/admin/stats", adminAC.WrapFunc(func(w http.ResponseWriter, r *http.Request) {
+	// ── Control plane (admin / dashboard) — adminMux ───────────────────────
+	// Only /login.html exists — there is no public registration page;
+	// accounts are created by an admin from the dashboard.
+	adminMux.HandleFunc("/login.html", adminAC.WrapFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, web.FS, "login.html")
+	}))
+	// Dashboard — gated by adminAC (network) THEN PageGuard (auth).
+	// Outsider → 404. Logged-out local → 302 /login.html.
+	adminMux.HandleFunc("/dashboard", adminAC.WrapFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusPermanentRedirect)
+	}))
+	dashboardFS := http.StripPrefix("/dashboard/", http.FileServer(http.FS(web.FS)))
+	adminMux.Handle("/dashboard/", adminAC.Wrap(apiServer.PageGuard(dashboardFS)))
+
+	// API endpoints — registered on a private mux, mounted behind adminAC.
+	apiMux := http.NewServeMux()
+	apiServer.RegisterRoutes(apiMux)
+	adminMux.Handle("/waf-api/", adminAC.Wrap(apiMux))
+
+	// Metrics (Prometheus) — admin-gated; leaks per-rule inventory.
+	adminMux.Handle("/metrics", adminAC.Wrap(promhttp.Handler()))
+	// Full metrics dump — admin-gated.
+	adminMux.HandleFunc("/admin/stats", adminAC.WrapFunc(func(w http.ResponseWriter, r *http.Request) {
 		metrics := ruleEngine.GetMetrics()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -679,42 +674,53 @@ func main() {
         }`, metrics.TotalEvaluations, metrics.TotalMatches,
 			metrics.TotalBlocks, ruleEngine.RuleCount())
 	}))
-	log.Println("✓ Admin endpoint: /admin/stats (admin-gated)")
+	adminMux.HandleFunc("/health", healthHandler)
+	// Bare / on the admin port → dashboard (still gated; outsiders get 404).
+	adminMux.HandleFunc("/", adminAC.WrapFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/dashboard/", http.StatusFound)
+	}))
+	log.Printf("✓ Control plane (dashboard, /waf-api, /metrics, /admin/*) on %s", cfg.Admin.Listen)
 
-	// WAF protected proxy - handles all other traffic
-	mux.Handle("/", wafMiddleware)
-	log.Println("✓ WAF proxy: / (all traffic)")
+	// ── Data plane (protected traffic) — trafficMux ────────────────────────
+	// Public probe that must NOT proxy to upstream, then everything else
+	// through the WAF. No admin routes here → management API is unreachable.
+	trafficMux.HandleFunc("/health", healthHandler)
+	trafficMux.Handle("/", wafMiddleware)
+	log.Printf("✓ Data plane (WAF proxy → upstream) on %s", cfg.Server.Listen)
 
 	// Prepare for graceful shutdown. TLS is intentionally NOT terminated here:
 	// the WAF speaks plain HTTP and a fronting layer (Cloudflare, nginx, Caddy…)
 	// terminates TLS, then forwards the real scheme via X-Forwarded-Proto. This
 	// keeps cert/key management out of the WAF — the same separation of concerns
 	// Coraza uses (the engine inspects, the proxy host owns TLS).
-	serverErrors := make(chan error, 1)
+	serverErrors := make(chan error, 2)
 
-	httpServer := &http.Server{
-		Addr:         cfg.Server.Listen,
-		Handler:      mux,
-		ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
-		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
-		IdleTimeout:  time.Duration(cfg.Server.IdleTimeout) * time.Second,
+	mkServer := func(addr string, h http.Handler) *http.Server {
+		return &http.Server{
+			Addr:         addr,
+			Handler:      h,
+			ReadTimeout:  time.Duration(cfg.Server.ReadTimeout) * time.Second,
+			WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
+			IdleTimeout:  time.Duration(cfg.Server.IdleTimeout) * time.Second,
+		}
 	}
+	trafficServer := mkServer(cfg.Server.Listen, trafficMux)
+	adminServer := mkServer(cfg.Admin.Listen, adminMux)
+
+	log.Println("==========================================")
+	log.Printf("🛡️  WAF data plane ACTIVE on %s  (protected traffic → upstream)", cfg.Server.Listen)
+	log.Printf("🖥️  Admin/dashboard on %s  →  http://%s/dashboard", cfg.Admin.Listen, cfg.Admin.Listen)
+	log.Println("   (HTTP only — terminate TLS upstream: Cloudflare / nginx / Caddy)")
+	log.Println("==========================================")
 
 	go func() {
-		log.Println("==========================================")
-		log.Printf("🛡️  WAF is now ACTIVE on %s (HTTP — terminate TLS upstream)", cfg.Server.Listen)
-		log.Println("==========================================")
-		log.Printf("Endpoints:")
-		log.Printf("  - Dashboard: http://%s/dashboard", cfg.Server.Listen)
-		log.Printf("  - Proxy:     http://%s/", cfg.Server.Listen)
-		log.Printf("  - API:       http://%s/api/*", cfg.Server.Listen)
-		log.Printf("  - Health:    http://%s/health", cfg.Server.Listen)
-		log.Printf("  - Metrics:   http://%s/metrics", cfg.Server.Listen)
-		log.Printf("  - Stats:     http://%s/admin/stats", cfg.Server.Listen)
-		log.Println("==========================================")
-
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			serverErrors <- fmt.Errorf("HTTP server error: %w", err)
+		if err := trafficServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErrors <- fmt.Errorf("traffic server error: %w", err)
+		}
+	}()
+	go func() {
+		if err := adminServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErrors <- fmt.Errorf("admin server error: %w", err)
 		}
 	}()
 
@@ -734,10 +740,13 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Shutdown server
-	log.Println("Shutting down HTTP server...")
-	if err := httpServer.Shutdown(ctx); err != nil {
-		log.Printf("HTTP server forced to shutdown: %v", err)
+	// Shutdown both listeners
+	log.Println("Shutting down HTTP servers...")
+	if err := trafficServer.Shutdown(ctx); err != nil {
+		log.Printf("traffic server forced to shutdown: %v", err)
+	}
+	if err := adminServer.Shutdown(ctx); err != nil {
+		log.Printf("admin server forced to shutdown: %v", err)
 	}
 
 	// Flush in-memory runtime state to DB so brute-force counters,

@@ -25,8 +25,11 @@ require_waf_up
 PYTHON="${SCRIPT_DIR}/../.venv/bin/python"
 [[ -x "$PYTHON" ]] || PYTHON="python3"
 
-# WAF base URL passed to most Python tests via --url (default: local HTTP WAF).
-WAF_BASE="${WAF_URL:-http://localhost:8080}"
+# The WAF runs two listeners: DATA plane (traffic → upstream) and CONTROL plane
+# (dashboard + /waf-api/*). Black-box tests send attacks to the data port and
+# read the admin API from the control port.
+TRAFFIC_BASE="${WAF_TRAFFIC_URL:-http://localhost:8081}"   # data plane (server.listen)
+ADMIN_BASE="${WAF_URL:-http://localhost:8080}"             # control plane (admin.listen)
 # ML service URL — the pure-model test talks straight to :8000 (no WAF).
 ML_BASE="${ML_URL:-http://127.0.0.1:8000}"
 
@@ -47,12 +50,13 @@ for t in "${TESTS[@]}"; do
   fi
 
   # .py tests run through the venv interpreter; bash tests run directly.
-  # The pure-model test targets the ML service (:8000); the rest hit the WAF.
+  # The pure-model test targets the ML service (:8000); the WAF tests take the
+  # data port (--url) and the control port (--admin-url).
   if [[ "$t" == *.py ]]; then
     if [[ "$t" == "test_ml_service.py" ]]; then
       runner=("$PYTHON" "$path" --url "$ML_BASE")
     else
-      runner=("$PYTHON" "$path" --url "$WAF_BASE")
+      runner=("$PYTHON" "$path" --url "$TRAFFIC_BASE" --admin-url "$ADMIN_BASE")
     fi
   elif [[ -x "$path" ]]; then
     runner=("$path")

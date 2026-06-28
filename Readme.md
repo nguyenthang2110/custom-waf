@@ -125,12 +125,16 @@ make down         # dừng cả ML và Postgres
 ```
 
 ### Cổng dịch vụ
-| Dịch vụ | Địa chỉ |
-|---|---|
-| Dashboard | `http://localhost:8080/dashboard` |
-| Proxy traffic | `http://localhost:8080` |
-| ML service | `http://127.0.0.1:8000` |
-| Backend upstream | `http://127.0.0.1:3000` |
+WAF tách **hai mặt phẳng** trên hai cổng riêng (kiểu control/data plane):
+
+| Dịch vụ | Địa chỉ | Mặt phẳng |
+|---|---|---|
+| Dashboard + API quản trị | `http://localhost:8080/dashboard` | **control** (`admin.listen`) |
+| Traffic được bảo vệ → upstream | `http://localhost:8081` | **data** (`server.listen`) |
+| ML service | `http://127.0.0.1:8000` | — |
+| Backend upstream | `http://127.0.0.1:3000` | — |
+
+> API quản trị (`/waf-api/*`, `/metrics`, `/admin/*`) **chỉ** nằm trên cổng control (8080); cổng data (8081) chỉ phục vụ traffic và không lộ API quản trị. Khi expose ra public (Cloudflare Tunnel / nginx), trỏ vào **cổng data 8081**; giữ 8080 cục bộ.
 
 ### Triển khai bằng Docker
 ```bash

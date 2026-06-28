@@ -288,8 +288,8 @@ def discover_tunnel_url(log_path: str) -> Optional[str]:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Multi-IP WAF traffic generator")
-    p.add_argument("--url", default="http://localhost:8080",
-                   help="WAF base URL (default: %(default)s)")
+    p.add_argument("--url", default="http://localhost:8081",
+                   help="WAF DATA-plane URL — protected traffic (default: %(default)s)")
     p.add_argument("--tunnel", action="store_true",
                    help="Target the public Cloudflare tunnel instead of --url "
                         "(auto-discovers the URL from $WAF_TUNNEL_URL or the "
@@ -339,7 +339,7 @@ def main() -> int:
         if not tunnel_url:
             print("Error: --tunnel set but no tunnel URL found.")
             print(f"Hint: start one with  cloudflared tunnel --url "
-                  f"http://localhost:8080 > {args.tunnel_log} 2>&1 &")
+                  f"http://localhost:8081 > {args.tunnel_log} 2>&1 &")
             print("      or export WAF_TUNNEL_URL=https://<your>.trycloudflare.com")
             return 1
         args.url = tunnel_url

@@ -69,13 +69,14 @@ def check(cond: bool, label: str) -> None:
         print(f"  \033[31mFAIL\033[0m  {label}")
 
 
-def send_and_fetch(base: str, path: str, ip: str) -> dict:
-    """Fire one request, then pull its access-log row back."""
+def send_and_fetch(base: str, admin: str, path: str, ip: str) -> dict:
+    """Fire one request at the DATA plane, then pull its access-log row back
+    from the CONTROL plane (the /waf-api/* API lives on the admin port)."""
     headers = dict(BROWSER_HEADERS, **{"X-Forwarded-For": ip})
     requests.get(base.rstrip("/") + path, headers=headers,
                  timeout=10, verify=False, allow_redirects=False)
     time.sleep(0.4)  # let the ring buffer settle
-    r = requests.get(base.rstrip("/") + f"/waf-api/logs?ip={ip}&per_page=1",
+    r = requests.get(admin.rstrip("/") + f"/waf-api/logs?ip={ip}&per_page=1",
                      timeout=10, verify=False)
     body = r.json()
     rows = body if isinstance(body, list) else body.get(
@@ -92,8 +93,8 @@ def ml_ok(ml: dict) -> bool:
     return bool(ml) and ml.get("called") and not ml.get("error") and bool(ml.get("label"))
 
 
-def run(base: str) -> None:
-    print(f"Target: {base}\n")
+def run(base: str, admin: str) -> None:
+    print(f"Traffic: {base}   Admin: {admin}\n")
 
     # Fresh spoofed IPs each run so blocked requests don't accumulate across
     # runs and auto-ban the test IPs (which would skew the rule-vs-ML attribution).
@@ -113,7 +114,7 @@ def run(base: str) -> None:
     print(f"\n1) GRAY-ZONE — {len(GRAY_PAYLOADS)} payloads rules can't decide, "
           "each must reach the ML service")
     for i, path in enumerate(GRAY_PAYLOADS):
-        g = send_and_fetch(base, path, f"44.{octet}.1.{i + 1}")
+        g = send_and_fetch(base, admin, path, f"44.{octet}.1.{i + 1}")
         ml = g.get("ml") or {}
         print(f"   score={score_of(g)} source={g.get('source')} "
               f"decision={g.get('decision')} ml={ml}")
@@ -125,7 +126,7 @@ def run(base: str) -> None:
         check(ok, f"reached ML → label={ml.get('label')} conf={conf}  ({path})")
 
     print("\n2) HIGH-SCORE attack — rules decide alone, ML is skipped")
-    h = send_and_fetch(base, HIGH, ip_high)
+    h = send_and_fetch(base, admin, HIGH, ip_high)
     hml = h.get("ml")
     print(f"   score={score_of(h)} source={h.get('source')} decision={h.get('decision')} ml={hml}")
     check((score_of(h) or 0) >= 5, "blatant attack scored >= 5 on rules alone")
@@ -133,7 +134,7 @@ def run(base: str) -> None:
     check(h.get("source") == "rule", "verdict attributed to rule only")
 
     print("\n3) CLEAN traffic — no rule match, ML skipped")
-    c = send_and_fetch(base, CLEAN, ip_clean)
+    c = send_and_fetch(base, admin, CLEAN, ip_clean)
     cml = c.get("ml")
     print(f"   score={score_of(c)} source={c.get('source')} decision={c.get('decision')} ml={cml}")
     check((score_of(c) or 0) == 0, "clean request scored 0")
@@ -142,20 +143,24 @@ def run(base: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ML gray-zone black-box test")
-    p.add_argument("--url", default="http://localhost:8080", help="WAF base URL")
+    p.add_argument("--url", default="http://localhost:8081",
+                   help="WAF DATA-plane URL — traffic (default: %(default)s)")
+    p.add_argument("--admin-url", default="http://localhost:8080",
+                   help="WAF CONTROL-plane URL — /waf-api/* (default: %(default)s)")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     base = args.url
+    admin = args.admin_url
     try:
-        requests.get(base.rstrip("/") + "/waf-api/logs?per_page=1", timeout=5, verify=False)
+        requests.get(admin.rstrip("/") + "/waf-api/logs?per_page=1", timeout=5, verify=False)
     except requests.exceptions.RequestException as e:
-        print(f"Error: cannot reach WAF at {base} ({e.__class__.__name__})")
+        print(f"Error: cannot reach WAF admin API at {admin} ({e.__class__.__name__})")
         return 1
 
-    run(base)
+    run(base, admin)
 
     bar = "-" * 56
     print(f"\n{bar}\nResult: {_passed} passed, {_failed} failed\n{bar}")

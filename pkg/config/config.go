@@ -106,6 +106,12 @@ type AlertWebhookDestination struct {
 //   - TrustedProxies: ["127.0.0.0/8", "::1/128"]  // local proxy/tunnel
 //   - RealIPHeader:   "CF-Connecting-IP"
 type AdminConfig struct {
+	// Listen is the control-plane address: dashboard, /waf-api, /metrics,
+	// /admin/* live here, SEPARATE from the data-plane (server.listen) that
+	// proxies protected traffic. Default ":8080". Keeping admin on its own
+	// listener isolates the management surface from public traffic (the
+	// control-plane / data-plane split used by SafeLine et al.).
+	Listen         string   `yaml:"listen"`
 	LocalOnly      bool     `yaml:"local_only"`
 	AllowedCIDRs   []string `yaml:"allowed_cidrs"`
 	TrustedProxies []string `yaml:"trusted_proxies"`
@@ -273,6 +279,11 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Admin.RealIPHeader == "" {
 		cfg.Admin.RealIPHeader = "CF-Connecting-IP"
+	}
+	// Control-plane listener: dashboard/API on its own port, separate from the
+	// data-plane (server.listen) that proxies protected traffic.
+	if cfg.Admin.Listen == "" {
+		cfg.Admin.Listen = "0.0.0.0:8080"
 	}
 
 	// Alert defaults — fill blanks left by user YAML.
