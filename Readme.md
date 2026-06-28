@@ -87,14 +87,12 @@ waf-project/
 *   **Model DistilBERT v8** đặt tại `model_v8/final_model_v8/` (không kèm trong repo — xem Bước 1)
 
 ### Bước 1: Tải model
-Model không commit trong git. Tải bản đóng gói từ GitHub Release rồi giải nén:
-```bash
-gh release download model-v8 -p '*.zip'        # hoặc tải tay từ trang Releases
-unzip 'model_v8-*.zip' -d .                     # tạo ra model_v8/final_model_v8/
-```
-Trang tải: <https://github.com/nguyenthang2110/custom-waf/releases/tag/model-v8>
+Model không commit trong git. Tải thư mục `final_model_v8/` từ Google Drive về,
+đặt vào `model_v8/` trong repo:
 
-Đường dẫn sau khi giải nén phải khớp `MODEL_DIR` mặc định: `model_v8/final_model_v8/`.
+> 📦 **Model + Dataset (Google Drive):** <https://drive.google.com/drive/folders/1un5pL9wrnDJ9971JTaNxsubzDwioFKSz?usp=sharing>
+
+Đường dẫn sau khi đặt phải khớp `MODEL_DIR` mặc định: `model_v8/final_model_v8/`.
 
 ### Bước 2: Cấu hình
 Chỉnh `configs/config.yaml`:
@@ -198,7 +196,7 @@ Model DistilBERT 11 lớp được train bằng notebook
 ### Dataset
 3 file CSV (cột `text`, `label`) — đặt public trên Google Drive:
 
-> 📦 **Dataset:** `<DÁN_LINK_GOOGLE_DRIVE_VÀO_ĐÂY>`
+> 📦 **Dataset:** <https://drive.google.com/drive/folders/1un5pL9wrnDJ9971JTaNxsubzDwioFKSz?usp=sharing>  (cùng thư mục Drive với model)
 
 | File | Số dòng |
 |---|---|
