@@ -150,29 +150,38 @@ IP proxy vào `admin.trusted_proxies`.
 
 ## 🧪 Kiểm Thử (Testing)
 
-Dự án cung cấp sẵn các script để kiểm thử khả năng bảo vệ của WAF:
+Bốn lớp kiểm thử — từ unit tới đánh giá phát hiện trên dataset chuẩn:
 
-### 1. Test với các lỗ hổng cơ bản
+### 1. Unit test (Go)
 ```bash
-# Chạy script Python giả lập tấn công từ nhiều IP
-python3 scripts/test_multi_ips.py
+make test          # = go test ./...  (engine, auth, middleware, config, admin-gate…)
 ```
 
-### 2. Test toàn diện (Comprehensive)
+### 2. Đánh giá phát hiện trên CSIC 2010 (detection benchmark)
+Harness `cmd/wafbench` đẩy bộ dữ liệu chuẩn **HTTP DATASET CSIC 2010** qua đúng
+pipeline production (parser → normalizer → rule engine) rồi in Recall / FPR /
+Precision / F1 — chính là số liệu trong báo cáo.
 ```bash
-# Chạy toàn bộ bộ test black-box (auto-ban + ML gray-zone)
-./scripts/test_all.sh
+# Tải dataset một lần (hướng dẫn ở docs/EVALUATION.md mục 6), rồi:
+go run ./cmd/wafbench -split test -tag test    # chỉ số trên tập TEST giữ kín
+go run ./cmd/wafbench -split all  -tag final   # headline toàn corpus
+```
+Phương pháp luận + cách tái lập đầy đủ: [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
-# Hoặc chạy riêng từng test (cần .venv có `requests`)
+### 3. Test chức năng black-box (WAF phải đang chạy)
+```bash
+./scripts/test_all.sh        # gộp: auto-ban + ML gray-zone + thuần ML (một lệnh)
+
+# hoặc chạy riêng (cần .venv có `requests`):
 .venv/bin/python scripts/test_ml_service.py     # thuần model, gửi thẳng :8000
-.venv/bin/python scripts/test_autoban.py        # auto-ban → blacklist
+.venv/bin/python scripts/test_autoban.py        # auto-ban → access-control blacklist
 .venv/bin/python scripts/test_ml_gray_zone.py   # rule không quyết → gọi ML service
+python3 scripts/test_multi_ips.py               # giả lập tấn công từ nhiều IP
 ```
 
-### 3. Test năng lực chịu tải (Benchmark)
+### 4. Test chịu tải (load)
 ```bash
-# Yêu cầu cài đặt 'ab' (Apache Bench)
-ab -n 1000 -c 100 http://localhost:8080/
+ab -n 1000 -c 100 http://localhost:8080/        # cần Apache Bench ('ab')
 ```
 
 ---
