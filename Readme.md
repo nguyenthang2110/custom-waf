@@ -37,7 +37,6 @@ Hệ thống WAF hiệu năng cao được xây dựng từ đầu bằng ngôn 
 ### 🚀 Performance & Infrastructure
 *   **High Performance**: Viết bằng Go (Golang) cho tốc độ xử lý cực nhanh và khả năng chịu tải lớn (Concurrency).
 *   **Dockerized**: Dễ dàng triển khai với Docker và Docker Compose.
-*   **TLS tách lớp**: WAF chạy HTTP thuần; TLS do lớp phía trước (Cloudflare / nginx / Caddy) terminate — gọn nhẹ, không phải quản lý chứng chỉ trong WAF.
 
 ---
 
@@ -99,18 +98,7 @@ make ml-install
 make ml-start MODEL_DIR=/abs/path/to/final_model_v8
 ```
 
-### Bước 5: TLS (do lớp ngoài lo)
-WAF **không** tự terminate TLS — nó chạy HTTP thuần trên `:8080`. Việc mã hóa
-đường truyền do lớp phía trước đảm nhiệm, tùy môi trường:
-*   **Dev / localhost**: dùng trực tiếp HTTP, không cần chứng chỉ.
-*   **Public qua Cloudflare Tunnel**: Cloudflare terminate TLS ở edge; chạy
-    `cloudflared tunnel --url http://localhost:8080`. WAF nhận IP thật qua
-    `CF-Connecting-IP` (cấu hình ở `admin.trusted_proxies`).
-*   **Public tự host**: đặt nginx/Caddy trước WAF, cấu hình chứng chỉ
-    (Let's Encrypt) ở đó rồi `proxy_pass` về `http://127.0.0.1:8080`. Nhớ
-    forward `X-Forwarded-Proto` để cookie `Secure` được set đúng.
-
-### Bước 6: Build & Run
+### Bước 5: Build & Run
 ```bash
 make build
 make run MODEL_DIR=/abs/path/to/final_model_v8
@@ -138,10 +126,7 @@ make docker-run
 
 ### Production (không dùng Docker)
 Linux dùng systemd (`deployments/systemd/`), Windows dùng Windows Service
-(`deployments/windows/install-services.ps1`). Đặt một reverse proxy TLS
-(nginx/Caddy/Cloudflare) phía trước, `proxy_pass` về `http://127.0.0.1:8080`,
-forward `X-Forwarded-Proto` + IP thật (`X-Real-IP`/`CF-Connecting-IP`) và khai
-IP proxy vào `admin.trusted_proxies`.
+(`deployments/windows/install-services.ps1`).
 
 > **Windows:** `make` không chạy trên CMD/PowerShell thuần. Dùng **WSL2** (khuyến nghị)
 > hoặc Git Bash, hoặc chạy thủ công `go build` + `uvicorn` + `docker compose`.
@@ -192,16 +177,6 @@ ab -n 1000 -c 100 http://localhost:8080/        # cần Apache Bench ('ab')
 *   **User mặc định**:
     *   Username: `admin`
     *   Password: `admin` (Vui lòng đổi mật khẩu sau khi đăng nhập)
-
----
-
-## 📝 Nhật Ký Thay Đổi (Changelog)
-
-*   **v1.0**: Initial Release - WAF Core Engine, Basic Rules.
-*   **v1.1**: Added Dashboard & Rate Limiting.
-*   **v1.2**: Integrated PostgreSQL Authentication & JWT.
-*   **v1.3**: Expanded Ruleset (78 rules, 13 categories).
-*   **v1.4**: ML gray-zone layer (DistilBERT). Bỏ TLS trong WAF — terminate ở lớp ngoài (giống Coraza). Real-IP admin gate sau proxy, auto-ban → blacklist.
 
 ---
 
