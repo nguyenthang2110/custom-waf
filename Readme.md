@@ -44,19 +44,35 @@ Hệ thống WAF hiệu năng cao được xây dựng từ đầu bằng ngôn 
 
 ```
 waf-project/
-├── cmd/waf/                # Điểm khởi chạy ứng dụng (Main entry point)
-├── configs/                # File cấu hình (config.yaml) và bộ luật (rules/)
+├── cmd/
+│   ├── waf/                # Điểm khởi chạy WAF (main entry point)
+│   └── wafbench/           # Harness benchmark phát hiện trên CSIC 2010
 ├── internal/
-│   ├── api/                # Xử lý các API endpoints (/waf-api/*)
-│   ├── auth/               # Logic xác thực và JWT
-│   ├── database/           # Kết nối và thao tác PostgreSQL
-│   ├── engine/             # Lõi xử lý WAF (Inspection, Matching)
-│   ├── middleware/         # Các lớp Middleware (Auth, Logging, WAF)
-│   └── models/             # Định nghĩa cấu trúc dữ liệu (User, Log)
+│   ├── api/                # API endpoints quản trị (/waf-api/*)
+│   ├── audit/              # Logger access + audit (JSON-lines + ring buffer)
+│   ├── auth/               # Xác thực & JWT
+│   ├── behavior/           # Behavior detector (brute-force, auto-ban)
+│   ├── configstore/        # Lưu cấu hình runtime xuống PostgreSQL
+│   ├── database/           # Kết nối PostgreSQL
+│   ├── decision/           # Decision engine (BLOCK / MONITOR / ALLOW)
+│   ├── engine/             # Rule engine (inspect, matching, ML hook)
+│   ├── metrics/            # Thu thập số liệu thống kê
+│   ├── middleware/         # Middleware WAF + admin access control
+│   ├── ml/                 # Client gọi ML service (HTTP)
+│   ├── models/             # Cấu trúc dữ liệu (User, Log)
+│   ├── normalizer/         # Chuẩn hoá request trước khi inspect
+│   ├── notifier/           # Gửi cảnh báo (Slack / Email / PagerDuty)
+│   ├── parser/             # Parse HTTP request
+│   ├── ratelimit/          # Rate limiter (Token Bucket per-IP)
+│   ├── statestore/         # Snapshot trạng thái runtime (IP lists…)
+│   └── training/           # Canonical text + xuất dữ liệu huấn luyện
+├── pkg/config/             # Định nghĩa & nạp config.yaml
+├── ml-service/             # ML service FastAPI + DistilBERT (app.py)
+├── configs/                # config.yaml và bộ luật (rules/)
 ├── migrations/             # Scripts khởi tạo database
-├── web/                    # Giao diện Frontend (HTML/CSS/JS)
-├── scripts/                # Scripts tiện ích (Setup DB, Test)
-└── deployments/            # Cấu hình Docker
+├── web/                    # Frontend (HTML/CSS/JS) nhúng vào binary
+├── scripts/                # Scripts tiện ích (setup DB, test)
+└── deployments/            # Docker, systemd, Windows Service
 ```
 
 ---
