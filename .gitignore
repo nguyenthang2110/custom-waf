@@ -71,6 +71,7 @@ eval/results/
 
 # Thesis LaTeX sources & build artifacts — not part of the WAF runtime.
 thesis/
+thesis_old_backup/
 
 # Local-only demo notes — kept on disk, not shipped.
 docs/DEMO_JUICESHOP.md
