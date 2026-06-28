@@ -187,6 +187,48 @@ ab -n 1000 -c 100 http://localhost:8080/        # cần Apache Bench ('ab')
 
 ---
 
+## 🧠 Huấn Luyện Model (Training)
+
+Model DistilBERT 11 lớp được train bằng notebook
+[`Web_Attack_Detection_v8.ipynb`](Web_Attack_Detection_v8.ipynb) trên **Google Colab**
+(GPU). Train **fresh** từ `distilbert-base-uncased` (không warm-start).
+
+**11 lớp:** `normal, sqli, xss, cmdi, path_traversal, ssrf, xxe, log4shell, ssti, nosqli, crlf`.
+
+### Dataset
+3 file CSV (cột `text`, `label`) — đặt public trên Google Drive:
+
+> 📦 **Dataset:** `<DÁN_LINK_GOOGLE_DRIVE_VÀO_ĐÂY>`
+
+| File | Số dòng |
+|---|---|
+| `train.csv` | 408.801 |
+| `val.csv` | 51.099 |
+| `test.csv` | 51.099 |
+
+`text` là **canonical WAF** (khớp byte-for-byte với `internal/training` phía Go và
+`ml-service/app.py` phía Python); `label` là một trong 11 lớp ở trên.
+
+### Các bước (Colab)
+1. Tải 3 file CSV từ Drive ở trên, đặt vào `MyDrive/web_attack_detection_v8/`.
+2. Mở `Web_Attack_Detection_v8.ipynb` bằng Colab → **Runtime → Change runtime type → GPU**
+   (A100/L4 khuyến nghị; T4 mất ~5–6h cho 3 epoch).
+3. Chạy lần lượt từng cell từ trên xuống.
+4. Notebook lưu model ra `MyDrive/web_attack_detection_v8/model_v8/final_model_v8/`
+   (kèm `label_config.json` + `confusion_v8.png`).
+
+**Cấu hình train** (CELL 3): `max_length=256`, `epochs=3`, `batch=32`, `lr=2e-5`,
+warmup 0.06, weight decay 0.01, label smoothing 0.05, class weights *balanced* (tự động).
+
+### Dùng model vừa train
+Tải thư mục `final_model_v8/` từ Drive về máy, đặt khớp `MODEL_DIR` mặc định:
+```
+model_v8/final_model_v8/
+```
+rồi chạy lại WAF (Bước 4–5). Hoặc trỏ tay: `make run MODEL_DIR=/abs/path/to/final_model_v8`.
+
+---
+
 ## 👤 Tài khoản Mặc định
 
 *   **Admin Dashboard**: `http://localhost:8080/dashboard`
