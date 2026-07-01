@@ -12,13 +12,17 @@ Hệ thống WAF hiệu năng cao được xây dựng từ đầu bằng ngôn 
 *   **Rule-based Detection**: Hệ thống luật (Ruleset) mạnh mẽ với 78 rules bao phủ 13 nhóm lỗ hổng (theo OWASP):
     *   SQL Injection (SQLi)
     *   Cross-Site Scripting (XSS)
-    *   Remote Code Execution (RCE)
-    *   Path Traversal / LFI
+    *   Path Traversal / Local File Inclusion (LFI)
+    *   Remote Code Execution (RCE) — bao gồm Log4Shell & Shellshock
     *   Server-Side Request Forgery (SSRF)
     *   XML External Entity (XXE)
     *   NoSQL Injection
-    *   Log4j & Shellshock
-    *   Scanner Detection & Behavior Analysis
+    *   Scanner Detection (dò quét, rà soát lỗ hổng)
+    *   Bot Detection (traffic tự động, bất thường)
+    *   Information Leakage (rò rỉ thông tin nhạy cảm)
+    *   Denial of Service (DoS)
+    *   Account Takeover (ATO)
+    *   Custom Rules (luật tùy biến)
 *   **Rate Limiting**: Thuật toán Token Bucket giúp chống DDoS và Brute Force.
 *   **IP Management**: Quản lý Blacklist/Whitelist động.
 
